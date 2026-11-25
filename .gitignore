@@ -1,0 +1,17 @@
+# Python / Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# SQLite Runtime Databases (created automatically via migrations)
+NEXUS/database/*.db
+NEXUS/database/*.db-wal
+NEXUS/database/*.db-shm
+NEXUS/database/rag_index/
+
+# Environment & OS
+.env
+.DS_Store
+Thumbs.db

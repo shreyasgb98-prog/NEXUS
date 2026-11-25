@@ -1,0 +1,292 @@
+[
+  {
+    "id": "REF-MITRE-T1499",
+    "topic": "deauth",
+    "title": "MITRE ATT&CK T1499 - Wireless Deauthentication Denial of Service",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1499",
+    "description": "An adversary transmits spoofed 802.11 deauthentication or disassociation frames to terminate client associations and deny network access.",
+    "threat_mechanism": "Unprotected 802.11 management frames lack cryptographic authentication in standard WPA2 personal configurations, allowing attackers to forge AP source MAC addresses and forcibly disconnect endpoints.",
+    "defensive_mitigation": "Enforce IEEE 802.11w-2009 Protected Management Frames (PMF), mandatory in WPA3 and optional in WPA2. PMF validates unicast and broadcast management frames with an integrity group key (BIP). High-value hardware should migrate to WPA3-Enterprise with mutual authentication. Directional RSSI monitoring isolates transmitting radio sources."
+  },
+  {
+    "id": "REF-MITRE-T1498",
+    "topic": "jamming",
+    "title": "MITRE ATT&CK T1498 - Radio Frequency Channel Flooding and Jamming",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1498",
+    "description": "An adversary floods 2.4 GHz radio channels with high-energy RF noise or preamble preemption, degrading signal-to-noise ratio.",
+    "threat_mechanism": "Continuous carrier wave generation or random pulse modulation occupies physical channel medium, inducing severe packet collision rates and triggering CSMA/CA exponential backoff across legitimate transceivers.",
+    "defensive_mitigation": "Deploy multi-band infrastructure supporting dynamic frequency selection (DFS) and automated channel failover to 5 GHz and 6 GHz spectrum. Maintain distributed passive spectrum monitors to identify noise floor elevation."
+  },
+  {
+    "id": "REF-MITRE-T1557-001",
+    "topic": "rogue",
+    "title": "MITRE ATT&CK T1557.001 - Wireless Adversary-in-the-Middle and Evil-Twin Impersonation",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1557.001",
+    "description": "An adversary establishes an unauthorized access point broadcasting a recognized enterprise SSID to intercept client traffic and authenticate rogue connections.",
+    "threat_mechanism": "Wireless endpoints automatically attempt connection to configured network identifiers with elevated signal strength. The adversary captures handshake tokens or serves spoofed captive portals.",
+    "defensive_mitigation": "Implement 802.1X EAP-TLS with enterprise-managed digital certificates, preventing endpoints from completing associations with unverified BSSIDs. Maintain a strict allowlist of authorized transmitter BSSIDs on monitoring sensors."
+  },
+  {
+    "id": "REF-MITRE-T1584",
+    "topic": "rogue",
+    "title": "MITRE ATT&CK T1584 - Compromise of Wireless Network Infrastructure",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1584",
+    "description": "Adversaries deploy rogue hardware transmitters or subvert wireless infrastructure to maintain persistence within internal operational networks.",
+    "threat_mechanism": "Rogue access points connected to internal Ethernet switches bypass peripheral perimeter firewalls, bridging untrusted wireless access directly to sensitive LAN segments.",
+    "defensive_mitigation": "Enable 802.1X port-level network access control (PNAC) on access-layer network switches. Configure rogue AP containment routines and passive RF sensor scanning across all channels."
+  },
+  {
+    "id": "REF-MITRE-T1040-SNIFF",
+    "topic": "mgmt",
+    "title": "MITRE ATT&CK T1040 - Wireless Promiscuous Sniffing and Reconnaissance",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1040",
+    "description": "An adversary operates radio hardware in monitor mode to capture 802.11 management exchanges, probe requests, and network parameters.",
+    "threat_mechanism": "Broadcast management frames contain cleartext configuration parameters, capability fields, supported encryption ciphers, and MAC addresses visible across physical transmission ranges.",
+    "defensive_mitigation": "Disable broadcast SSID announcements where feasible. Mandate client MAC address randomization and disable legacy WPS (Wi-Fi Protected Setup) PIN authentication."
+  },
+  {
+    "id": "REF-MITRE-T1456-JAM",
+    "topic": "ble",
+    "title": "MITRE ATT&CK T1456 - Bluetooth and Peripheral Channel Denial of Service",
+    "framework": "MITRE ATT&CK",
+    "technique_id": "T1456",
+    "description": "An adversary disrupts short-range wireless channels using repetitive synchronization bursts or malformed connection parameter requests.",
+    "threat_mechanism": "Sending dense bursts of connection request packets consumes baseband processing buffers on Bluetooth controller chips, inducing firmware watchdog resets.",
+    "defensive_mitigation": "Isolate critical telemetry pathways from unauthenticated Bluetooth links. Deploy physical RF shielding for localized sensors and enforce controller-level packet drop thresholds."
+  },
+  {
+    "id": "REF-OWASP-W01-80211W",
+    "topic": "deauth",
+    "title": "OWASP Wireless W01 - Protected Management Frames (802.11w) Enforcement",
+    "framework": "OWASP Wireless",
+    "technique_id": "W01-PMF",
+    "description": "Vulnerability of wireless networks to unauthenticated management frame injection leading to operational paralysis.",
+    "threat_mechanism": "Without 802.11w cryptographic integrity, spoofed deauthentication frames terminate sessions instantly, forcing constant re-association sequences.",
+    "defensive_mitigation": "Configure access points with PMF Required (WPA3-SAE / WPA3-Enterprise). For legacy deployments, enable PMF Capable mode and monitor EWMA deauthentication variance spikes."
+  },
+  {
+    "id": "REF-OWASP-W02-ROGUE-ISOLATION",
+    "topic": "rogue",
+    "title": "OWASP Wireless W02 - Rogue Access Point Detection and Port Isolation",
+    "framework": "OWASP Wireless",
+    "technique_id": "W02-ROGUE",
+    "description": "Presence of unauthorized access points advertising authorized enterprise SSIDs on unexpected radio channels.",
+    "threat_mechanism": "Adversaries simulate legitimate BSSIDs with higher transmit power, tricking clients into deauthenticating from genuine APs and connecting to rogue infrastructure.",
+    "defensive_mitigation": "Compare observed BSSID-to-SSID mappings against an authenticated database. Trigger automated switch port shutdowns via SNMP/RADIUS upon rogue BSSID identification."
+  },
+  {
+    "id": "REF-OWASP-W03-WPA3-ENTERPRISE",
+    "topic": "rogue",
+    "title": "OWASP Wireless W03 - WPA3-Enterprise 802.1X Mutual Authentication",
+    "framework": "OWASP Wireless",
+    "technique_id": "W03-8021X",
+    "description": "Exposure to credential interception and credential harvesting via rogue access points using preshared keys.",
+    "threat_mechanism": "Preshared keys (WPA2-PSK) share identical credentials across endpoints, enabling offline dictionary attacks against four-way handshakes captured over the air.",
+    "defensive_mitigation": "Deploy 802.1X EAP-TLS with endpoint certificates stored in hardware TPMs or secure enclaves. Terminate RADIUS authentications against private root certificate authorities."
+  },
+  {
+    "id": "REF-OWASP-W04-WIDS-DEPLOYMENT",
+    "topic": "mgmt",
+    "title": "OWASP Wireless W04 - Distributed Wireless Intrusion Detection Architecture",
+    "framework": "OWASP Wireless",
+    "technique_id": "W04-WIDS",
+    "description": "Lack of real-time visibility into wireless physical layer anomalies across multi-building facilities.",
+    "threat_mechanism": "Distributed attack sources operate with directional antennas or low transmit power to avoid detection by distant centralized access points.",
+    "defensive_mitigation": "Distribute dedicated edge sniffer sensors (such as ESP32-S3 nodes) that continuously monitor management traffic across 2.4 GHz channels and pipe telemetry to an anomaly detection engine."
+  },
+  {
+    "id": "REF-OWASP-W05-BLE-SPAM",
+    "topic": "ble",
+    "title": "OWASP Wireless W05 - BLE Advertisement Spam Mitigation",
+    "framework": "OWASP Wireless",
+    "technique_id": "W05-BLE-SPAM",
+    "description": "Denial of service and battery exhaustion induced by automated BLE advertising injection toolkits.",
+    "threat_mechanism": "Injecting thousands of spoofed manufacturer data advertisements saturates Bluetooth controller scan buffers and prompts background pairing daemons.",
+    "defensive_mitigation": "Establish sliding-window rate limiters on BLE scan handlers. Discard advertising packets exhibiting non-standard manufacturer identifiers and flag high-z-score advertising spikes."
+  },
+  {
+    "id": "REF-OWASP-W06-BLE-RANDOM-MAC",
+    "topic": "ble",
+    "title": "OWASP Wireless W06 - Bluetooth Address Privacy and Tracking Defense",
+    "framework": "OWASP Wireless",
+    "technique_id": "W06-BLE-PRIVACY",
+    "description": "Static MAC address transmission in peripheral advertisements facilitates physical location tracking and profiling.",
+    "threat_mechanism": "Static address broadcasting allows eavesdroppers to correlate physical device movements across distributed observation sensors.",
+    "defensive_mitigation": "Enforce Resolvable Private Addresses (RPA) with periodic cryptographic address rotation intervals of 15 minutes. Mandate identity resolving keys (IRK) during initial bonding."
+  },
+  {
+    "id": "REF-OWASP-W07-RF-JAMMING-24GHZ",
+    "topic": "jamming",
+    "title": "OWASP Wireless W07 - 2.4 GHz Industrial RF Noise and Jamming Response",
+    "framework": "OWASP Wireless",
+    "technique_id": "W07-RF-JAM",
+    "description": "Intentional carrier interference or industrial RF noise rendering 2.4 GHz telemetry channels inoperable.",
+    "threat_mechanism": "Continuous non-802.11 RF energy from spark gaps, microwave emitters, or software-defined radios forces carrier sense engines to register permanent medium busy states.",
+    "defensive_mitigation": "Configure dual-band failover architectures. When clear channel assessment (CCA) failure rates exceed 80 percent, transfer high-priority traffic to 5 GHz UNII bands."
+  },
+  {
+    "id": "REF-OWASP-W08-CHANNEL-FAILOVER",
+    "topic": "jamming",
+    "title": "OWASP Wireless W08 - Dynamic Frequency Selection and Channel Agility",
+    "framework": "OWASP Wireless",
+    "technique_id": "W08-DFS-FAIL",
+    "description": "Channel concentration risks where all telemetry concentrates on a single congested radio channel.",
+    "threat_mechanism": "An adversary targeting a single channel (such as Channel 1, 6, or 11) disrupts all telemetry when endpoints lack automated frequency coordination.",
+    "defensive_mitigation": "Implement frequency agility protocols where telemetry nodes negotiate secondary channels upon sustained packet drops or consecutive frame timeouts."
+  },
+  {
+    "id": "REF-OWASP-W09-NFC-CLONING",
+    "topic": "nfc",
+    "title": "OWASP Wireless W09 - NFC Card Emulation and UID Spoofing Defense",
+    "framework": "OWASP Wireless",
+    "technique_id": "W09-NFC-CLONE",
+    "description": "Physical credential duplication using variable-UID cards or software emulation devices.",
+    "threat_mechanism": "Legacy access control readers verify only the 4-byte or 7-byte factory UID of ISO 14443-A cards without cryptographic challenge verification.",
+    "defensive_mitigation": "Upgrade access readers to require AES-128 cryptographic challenge-response authentication (MIFARE DESFire EV3 or equivalent). Disable read modes relying exclusively on card UIDs."
+  },
+  {
+    "id": "REF-OWASP-W10-RFID-ISOLATION",
+    "topic": "nfc",
+    "title": "OWASP Wireless W10 - Proximity RFID Interrogation Throttling",
+    "framework": "OWASP Wireless",
+    "technique_id": "W10-RFID-THROTTLE",
+    "description": "Rapid interrogation bursts from unauthorized portable readers attempting badge harvesting.",
+    "threat_mechanism": "Unauthorized high-power 13.56 MHz reader antennas skim credentials from badges through pockets or bags in public thoroughfares.",
+    "defensive_mitigation": "Issue physical shielding sleeves (Faraday card holders). Implement read-frequency anomaly detectors on stationary reader portals to detect rapid sequential scans."
+  },
+  {
+    "id": "REF-OWASP-IOT-BLE",
+    "topic": "ble",
+    "title": "OWASP IoT Security Guidance - Bluetooth Low Energy Channel Saturation",
+    "framework": "OWASP IoT",
+    "technique_id": "M03-BLE",
+    "description": "Excessive 2.4 GHz BLE advertising traffic across primary advertising channels 37, 38, and 39 causes channel saturation and buffer exhaustion.",
+    "threat_mechanism": "Broadcasting high-frequency BLE advertising frames saturates receiver scan windows and fills memory buffers on listening IoT devices, preventing legitimate connections.",
+    "defensive_mitigation": "Apply rate-limiting thresholds on BLE observation buffers, inspect advertising payload structures, identify repeating transmitter MAC addresses, and evaluate received signal strength variations."
+  },
+  {
+    "id": "REF-OWASP-IOT-NFC",
+    "topic": "nfc",
+    "title": "OWASP IoT Guidance - NFC and RFID Interrogation and Replay",
+    "framework": "OWASP IoT",
+    "technique_id": "M07-NFC",
+    "description": "Rapid successive scans or unauthorized tag reads indicate proximity skimming or credential harvesting attempts at physical sensors.",
+    "threat_mechanism": "Passive High Frequency (13.56 MHz) NFC/RFID cards and tags respond to unauthorized reader interrogation without mutual authentication, exposing Unique Identifiers for cloning.",
+    "defensive_mitigation": "Enforce cryptographic challenge-response authentication rather than relying on static card UIDs. Enforce physical reader rate-limiting, shield stored credentials with Faraday covers, and isolate readers recording anomalous interrogation bursts."
+  },
+  {
+    "id": "REF-GEN-MGMT",
+    "topic": "mgmt",
+    "title": "Wireless Defense Standard - 2.4 GHz Management Frame Flooding",
+    "framework": "Wireless Defense",
+    "technique_id": "W-MGMT-01",
+    "description": "Unusual management frame surges indicate probe request storms, association request floods, or transmitter impersonation.",
+    "threat_mechanism": "Flooding access points with association requests or probe requests degrades wireless media access control capacity and exhausts AP state memory.",
+    "defensive_mitigation": "Inspect 2.4 GHz spectrum utilization, review access point event logs for state-table exhaustion, enable AP client isolation, and identify offending client radio addresses."
+  },
+  {
+    "id": "REF-OWASP-W11-EAP-TLS",
+    "topic": "rogue",
+    "title": "OWASP Wireless W11 - Enterprise Certificate Pinning for Wireless Profiles",
+    "framework": "OWASP Wireless",
+    "technique_id": "W11-PINNING",
+    "description": "Client acceptance of untrusted server certificates during EAP-PEAP / EAP-TTLS outer authentication phases.",
+    "threat_mechanism": "Users connect to rogue APs and click past certificate trust warnings, allowing adversary proxies to terminate PEAP sessions and extract MSCHAPv2 hashes.",
+    "defensive_mitigation": "Deploy mobile device management (MDM) profiles that pin the enterprise root certificate authority and explicitly restrict trusted server certificate common names."
+  },
+  {
+    "id": "REF-OWASP-W12-CLIENT-ISOLATION",
+    "topic": "mgmt",
+    "title": "OWASP Wireless W12 - Client-to-Client Layer 2 Isolation Enforcement",
+    "framework": "OWASP Wireless",
+    "technique_id": "W12-ISOLATION",
+    "description": "Inter-client communication on shared wireless networks enabling peer reconnaissance and lateral movement.",
+    "threat_mechanism": "Associating with an open or shared wireless network allows compromised endpoints to broadcast ARP requests, port-scan neighbors, and execute direct exploits.",
+    "defensive_mitigation": "Enforce Layer 2 client isolation on all wireless access points. Prohibit direct peer-to-peer frame forwarding across wireless BSSIDs."
+  },
+  {
+    "id": "REF-OWASP-W13-KRACK-FAST-BSS",
+    "topic": "deauth",
+    "title": "OWASP Wireless W13 - Key Reinstallation and 802.11r Handshake Hardening",
+    "framework": "OWASP Wireless",
+    "technique_id": "W13-KRACK",
+    "description": "State synchronization flaws during fast BSS transitions (802.11r) allowing state replay attacks.",
+    "threat_mechanism": "Adversaries intercept message 3 of the 4-way handshake, retransmitting it to cause nonce reuse and keystream decryption.",
+    "defensive_mitigation": "Install operating system firmware patches preventing nonce reuse during cryptographic handshake state machines. Mandate WPA3 with Protected Management Frames."
+  },
+  {
+    "id": "REF-OWASP-W14-MGMT-RATE-LIMIT",
+    "topic": "mgmt",
+    "title": "OWASP Wireless W14 - Hardware Management Frame Ingestion Throttling",
+    "framework": "OWASP Wireless",
+    "technique_id": "W14-RATE-LIMIT",
+    "description": "Microcontroller receiver buffer exhaustion caused by high-rate management frame bursts.",
+    "threat_mechanism": "Promiscuous packet filtering inside software interrupt routines consumes CPU cycles, triggering hardware watchdog resets on sensor nodes.",
+    "defensive_mitigation": "Implement hardware bitmask filtering at the radio MAC layer. Drop frames failing length and subtype validation inside interrupt service routines without dynamic heap allocation."
+  },
+  {
+    "id": "REF-OWASP-W15-PHYSICAL-FARADAY",
+    "topic": "nfc",
+    "title": "OWASP Wireless W15 - Physical Layer Attenuation and Shielding",
+    "framework": "OWASP Wireless",
+    "technique_id": "W15-SHIELDING",
+    "description": "Unintended electromagnetic radiation leakage enabling non-line-of-sight signal capture outside facility boundaries.",
+    "threat_mechanism": "High-gain external antennas intercept side-channel RF emissions and unshielded cabling radiation from building perimeters.",
+    "defensive_mitigation": "Apply RF-attenuating window films and conductive architectural coatings to contain wireless signals within designated security perimeters."
+  },
+  {
+    "id": "REF-OWASP-W16-SPECTRUM-AUDIT",
+    "topic": "jamming",
+    "title": "OWASP Wireless W16 - Continuous RF Spectrum Auditing and Baselining",
+    "framework": "OWASP Wireless",
+    "technique_id": "W16-SPECTRUM",
+    "description": "Inability to detect intermittent covert transmitters operating in non-standard frequency bands.",
+    "threat_mechanism": "Low-probability-of-intercept frequency-hopping transmitters bypass standard 802.11 protocol analyzers by avoiding standard channel centers.",
+    "defensive_mitigation": "Employ continuous broad-spectrum sweep sensors evaluating raw power spectral density against calibrated historical baselines."
+  },
+  {
+    "id": "REF-ARCH-PMF-DEEP-DIVE",
+    "topic": "deauth",
+    "title": "IEEE 802.11w Protected Management Frames (PMF) Cryptographic Deep Dive",
+    "framework": "IEEE 802.11w-2009 / WPA3-SAE",
+    "technique_id": "T1498.001-PMF",
+    "description": "Detailed technical architecture of Protected Management Frames (802.11w) protecting unicast and broadcast management frames against spoofed injection.",
+    "threat_mechanism": "Standard 802.11 networks transmit deauthentication and disassociation frames unencrypted and unauthenticated, enabling adversaries with monitor-mode injection interfaces to forge transmitter addresses and disrupt station associations.",
+    "defensive_mitigation": "IEEE 802.11w mandates cryptographic encapsulation of management frames. Unicast management frames are encrypted and authenticated using the negotiated pairwise transient key (CCMP/GCMP). Broadcast and multicast management frames (such as group deauthentication or channel switch announcements) append a Broadcast Integrity Protocol (BIP) Information Element verified via AES-128 CMAC (Cipher-based Message Authentication Code). Receiving station MAC layers discard any deauthentication frame lacking a valid CMAC signature without tearing down the authenticated connection state, completely neutralizing spoofed deauthentication attacks."
+  },
+  {
+    "id": "REF-ARCH-BLE-FLOOD-ANOMALY",
+    "topic": "ble",
+    "title": "Bluetooth Low Energy Advertisement Flood Anomaly Indicators and Mitigation",
+    "framework": "Bluetooth Core Specification v5.4 / OWASP IoT",
+    "technique_id": "M03-BLE-FLOOD",
+    "description": "Technical distinction between ambient BLE advertising intervals and high-frequency adversarial advertisement floods causing receiver stack buffer exhaustion.",
+    "threat_mechanism": "Ambient BLE peripheral devices transmit advertising packets at regular intervals between 100ms and 1024ms (with 0ms–10ms pseudo-random jitter) across primary advertising channels 37, 38, and 39. Adversarial flooding tools inject continuous bursts of thousands of randomized or malformed advertising PDUs per second, overflowing controller HCI packet buffers and causing receiver stack buffer exhaustion.",
+    "defensive_mitigation": "Enforce sliding-window rate limiting on BLE scan handlers. Calculate recursive EWMA baseline statistics on received advertising packet rates and flag z-score surges (Z > 3.5). Isolate or drop frames exhibiting non-standard manufacturer payloads or excessive transmit frequencies."
+  },
+  {
+    "id": "REF-ARCH-EWMA-VS-FIXED",
+    "topic": "detection",
+    "title": "Recursive EWMA Baseline vs Fixed Static Threshold Detector Evaluation",
+    "framework": "Statistical Anomaly Detection Standards",
+    "technique_id": "DET-EWMA-STAT",
+    "description": "Mathematical comparison between static threshold detectors and recursive Exponentially Weighted Moving Average baselines with attack freezing.",
+    "threat_mechanism": "Static fixed thresholds fail across dynamic wireless environments: setting a high threshold misses stealthy slow-rate deauthentication floods (high false negatives), while setting a low threshold generates excessive false alarms during diurnal traffic peaks or campus shift changes (high false positives).",
+    "defensive_mitigation": "NEXUS implements recursive Exponentially Weighted Moving Average (EWMA) tracking mean (mu_t = alpha * x_t + (1 - alpha) * mu_{t-1}) and sample variance (sigma^2_t = alpha * (x_t - mu_t)^2 + (1 - alpha) * sigma^2_{t-1}) with smoothing factor alpha = 0.12. When anomaly z-scores exceed Z > 3.5, the baseline update is frozen to prevent adversary poisoning of learned statistics. This yields high noise suppression compared to raw static cutoffs while adapting smoothly to diurnal traffic shifts."
+  },
+  {
+    "id": "REF-ARCH-SEQ-DISCONTINUITY",
+    "topic": "injection",
+    "title": "IEEE 802.11 Sequence Control Discontinuity and Software Injection Detection",
+    "framework": "IEEE 802.11 MAC Layer Standards",
+    "technique_id": "INJ-SEQ-TRACK",
+    "description": "Technical rationale on how a 12-bit IEEE 802.11 sequence counter exposes raw software packet injection through static zero values or step jumps exceeding normal increment deltas.",
+    "threat_mechanism": "Legitimate hardware wireless NIC transceivers increment the 12-bit sequence number field (0–4095) sequentially on the radio chipset for every transmitted frame. Software-based injection tools (such as Scapy, aireplay-ng, or raw C PF_PACKET sockets) transmit frames with static sequence numbers (frequently 0), uninitialized pseudo-random sequence numbers, or large delta jumps exceeding normal increment deltas.",
+    "defensive_mitigation": "Monitor sequence counter deltas (seq_delta = (seq_current - seq_prev) % 4096) per transmitter MAC address. Any deauthentication or management frame exhibiting static zero sequence numbers or delta discontinuities exceeding normal retransmission boundaries is flagged as raw software injection with high confidence."
+  }
+]

@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<!-- avoid-ai-design-ignore-file: T1, SD4, C9 -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS AI - Defensive RF Telemetry Workstation</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        /* Accessible Workstation Keyboard Focus */
+        :focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+            outline: 1px dotted #38bdf8;
+            outline-offset: 1px;
+        }
+    </style>
+</head>
+<body class="workstation-body">
+
+    <!-- ========================================================
+         1. CLASSIC WINDOW TITLE BAR
+         ======================================================== -->
+    <header class="workstation-titlebar">
+        <div class="titlebar-left">
+            <span class="titlebar-icon">&#x25C8;</span>
+            <span class="titlebar-text">NEXUS AI Workstation &mdash; Passive Defensive RF Telemetry & Anomaly Detector [ESP32-S3]</span>
+        </div>
+        <div class="titlebar-right">
+            <span class="titlebar-badge" id="titlebarModeBadge">SIMULATION ACTIVE</span>
+        </div>
+    </header>
+
+    <!-- ========================================================
+         2. CLASSIC MENU BAR
+         ======================================================== -->
+    <nav class="workstation-menubar" aria-label="Application Menu">
+        <div class="menu-item" data-menu="file">
+            <span class="menu-label">File</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuExportCsv">Export Telemetry Ledger (CSV)... <span class="hotkey">Ctrl+E</span></button>
+                <button class="menu-action" id="menuExportJson">Export Structured Incident Log (JSON)... <span class="hotkey">Ctrl+J</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-action" id="menuLoadCsv">Replay Historical Capture (CSV)...</button>
+                <div class="menu-divider"></div>
+                <button class="menu-action menu-action-danger" id="menuPurgeDb">Purge Baseline & Database... <span class="hotkey">Del</span></button>
+            </div>
+        </div>
+
+        <div class="menu-item" data-menu="capture">
+            <span class="menu-label">Capture</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuModeSim">Simulation Mode (Synthetic Generator)</button>
+                <button class="menu-action" id="menuModeLive">Live Hardware Ingest (Web Serial 115200)</button>
+                <button class="menu-action" id="menuModeReplay">Replay Recorded Capture</button>
+                <div class="menu-divider"></div>
+                <button class="menu-action" id="menuStartPause">Pause / Resume Ingest <span class="hotkey">Space</span></button>
+                <button class="menu-action" id="menuConnectSerial">Connect ESP32-S3 Serial Port...</button>
+            </div>
+        </div>
+
+        <div class="menu-item" data-menu="view">
+            <span class="menu-label">View</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuViewRf">Multi-Spectral RF Matrix <span class="hotkey">F1</span></button>
+                <button class="menu-action" id="menuViewIncidents">Incident Triage & Playbooks <span class="hotkey">F2</span></button>
+                <button class="menu-action" id="menuViewLedger">Telemetry Ledger Log <span class="hotkey">F3</span></button>
+                <button class="menu-action" id="menuViewBenchmark">Benchmark & Evaluation <span class="hotkey">F4</span></button>
+                <button class="menu-action" id="menuViewSettings">Settings & Hardware Configuration <span class="hotkey">F5</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-action" id="menuToggleAssistant">Ask NEXUS AI Assistant <span class="hotkey">Ctrl+K</span></button>
+                <button class="menu-action" id="menuToggleAudio">Toggle Audio Alarm Synthesizer</button>
+            </div>
+        </div>
+
+        <div class="menu-item" data-menu="triage">
+            <span class="menu-label">Triage</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuAcknowledgeAll">Acknowledge All Open Incidents</button>
+                <button class="menu-action" id="menuLearnEnv">Learn Trusted BSSIDs From Active Traffic</button>
+                <button class="menu-action" id="menuExportReport">Generate Defensive Incident Report</button>
+            </div>
+        </div>
+
+        <div class="menu-item" data-menu="benchmark">
+            <span class="menu-label">Benchmark</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuRunSweep">Compute Empirical Threshold Sweep (Z = 2.0 to 5.0)</button>
+                <button class="menu-action" id="menuToggleLab">Toggle Lab Mode (Attack Injections)</button>
+                <button class="menu-action" id="menuRunDemoScenario">Execute Scripted Evaluation Scenario (Wazuh)</button>
+            </div>
+        </div>
+
+        <div class="menu-item" data-menu="help">
+            <span class="menu-label">Help</span>
+            <div class="menu-dropdown">
+                <button class="menu-action" id="menuHelpSpecs">Hardware Specifications (ESP32-S3 N16R8)</button>
+                <button class="menu-action" id="menuHelpMitre">MITRE ATT&CK Matrix Cross-Reference</button>
+                <button class="menu-action" id="menuHelpAbout">About NEXUS AI Defensive Telemetry</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- ========================================================
+         3. ACTION TOOLBAR (Raised Beveled Utility Buttons)
+         ======================================================== -->
+    <div class="workstation-toolbar" role="toolbar" aria-label="Telemetry Controls">
+        <!-- Ingestion Mode Radio Group -->
+        <div class="toolbar-group">
+            <span class="toolbar-label">MODE:</span>
+            <button id="btnModeSim" class="tool-btn active" title="Run synthetic browser telemetry generator">Simulation</button>
+            <button id="btnModeLive" class="tool-btn" title="Stream live frames via Web Serial API">Live Serial</button>
+            <button id="btnModeReplay" class="tool-btn" title="Replay recorded capture CSV">Replay CSV</button>
+        </div>
+
+        <div class="toolbar-separator"></div>
+
+        <!-- Primary Execution Actions -->
+        <div class="toolbar-group">
+            <button id="btnRunDemo" class="tool-btn tool-btn-primary" title="Trigger scripted 3-stage validation scenario">&#x25B6; Run Demo</button>
+            <button id="btnStartPause" class="tool-btn" title="Pause or resume live telemetry processing">&#x23F8; Pause</button>
+            <button id="btnResetLab" class="tool-btn tool-btn-danger" title="Purge database, baselines, and recorded incidents">&#x23F9; Reset</button>
+        </div>
+
+        <div class="toolbar-separator"></div>
+
+        <!-- Serial Connect Button (Shown when in Live Mode) -->
+        <button id="btnConnectSerial" class="tool-btn tool-btn-accent" style="display: none;" title="Open Web Serial port dialog">
+            &#x1F50C; Connect Serial (115200)
+        </button>
+
+        <!-- Hardware & AI Utilities -->
+        <div class="toolbar-group">
+            <button id="btnToggleAssistant" class="tool-btn" title="Toggle Ask NEXUS AI Copilot Drawer (Ctrl+K)">
+                &#x1F4AC; Ask NEXUS
+            </button>
+            <button id="btnToggleLabMode" class="tool-btn" title="Toggle Lab Mode for synthetic injections">
+                <span class="lab-mode-dot"></span><span>Lab Mode: OFF</span>
+            </button>
+        </div>
+
+        <!-- Replay Bar Controls (Shown when in Replay Mode) -->
+        <div id="replayToolbar" class="toolbar-group replay-bar" style="display: none;">
+            <input type="file" id="inputCsvReplay" style="display: none;" accept=".csv">
+            <button id="btnLoadCsv" class="tool-btn">&#x1F4C1; Load CSV</button>
+            <button id="btnReplayPlayPause" class="tool-btn">&#x25B6; Play</button>
+            <input type="range" id="replayScrubber" class="replay-scrubber" min="0" max="0" value="0">
+            <span id="replayProgressText" class="font-mono toolbar-subtext">0 / 0</span>
+        </div>
+
+        <!-- Reload Depth Selector & Hydration -->
+        <div class="toolbar-group">
+            <span class="toolbar-label">HISTORY:</span>
+            <select id="selectReloadDepth" class="tool-select font-mono" title="Number of historical windows to hydrate on reload">
+                <option value="65">Last 65 Wins</option>
+                <option value="100" selected>Last 100 Wins</option>
+                <option value="250">Last 250 Wins</option>
+                <option value="500">Last 500 Wins</option>
+                <option value="0">All Stored</option>
+            </select>
+            <button id="btnReloadHistory" class="tool-btn" title="Hydrate active history from SQLite">&#x21BB;</button>
+        </div>
+
+        <div class="toolbar-separator"></div>
+
+        <!-- Filter Dropdown & Export on Far Right -->
+        <div class="toolbar-group toolbar-right">
+            <span class="toolbar-label">WINDOW:</span>
+            <select id="selectTimeRange" class="tool-select font-mono" title="Filter active window depth">
+                <option value="65">Last 65 Wins</option>
+                <option value="150">Last 150 Wins</option>
+                <option value="500">Last 500 Wins</option>
+            </select>
+            <button id="btnExportCsv" class="tool-btn" title="Export raw telemetry log as CSV">Export CSV</button>
+            <button id="btnExportJson" class="tool-btn" title="Export incident records as JSON">Export JSON</button>
+        </div>
+    </div>
+
+    <!-- Mode Banner (Appears if synthetic or specific warning active) -->
+    <div id="modeWarningStrip" class="warning-strip simulation-mode">
+        <span class="strip-tag">[SIMULATION MODE]</span>
+        <span id="modeWarningText">SYNTHETIC TEST DATA: Telemetry values are generated synthetically in-browser to validate EWMA baselines and multi-signal anomaly correlation.</span>
+    </div>
+
+    <!-- ========================================================
+         4. CLASSIC TABBED PROPERTY SHEET (Center / Main Viewport)
+         ======================================================== -->
+    <main class="workstation-sheet">
+        <!-- Property Sheet Tab Header Strip -->
+        <div class="sheet-tab-strip" role="tablist">
+            <button class="sheet-tab active" data-tab="rf-matrix" role="tab" aria-selected="true" id="tabRfMatrix">
+                <span class="tab-icon">&#x229E;</span> Multi-Spectral RF Matrix
+            </button>
+            <button class="sheet-tab" data-tab="incidents" role="tab" aria-selected="false" id="tabIncidents">
+                <span class="tab-icon">&#x26A0;</span> Incident Triage &amp; Playbooks
+                <span id="tabBadgeIncidents" class="tab-badge">0</span>
+            </button>
+            <button class="sheet-tab" data-tab="telemetry" role="tab" aria-selected="false" id="tabTelemetry">
+                <span class="tab-icon">&#x2630;</span> Telemetry Ledger
+            </button>
+            <button class="sheet-tab" data-tab="benchmark" role="tab" aria-selected="false" id="tabBenchmark">
+                <span class="tab-icon">&#x2696;</span> Benchmark &amp; Evaluation
+            </button>
+            <button class="sheet-tab" data-tab="settings" role="tab" aria-selected="false" id="tabSettings">
+                <span class="tab-icon">&#x2699;</span> Settings &amp; Hardware
+            </button>
+        </div>
+
+        <!-- ====================================================
+             TAB PANEL 1: MULTI-SPECTRAL RF MATRIX (Hero Canvas)
+             ==================================================== -->
+        <section id="panel-rf-matrix" class="tab-panel active" role="tabpanel" aria-labelledby="tabRfMatrix">
+            <div class="rf-matrix-layout" id="sec-overview-view">
+                <!-- Left / Center: Phosphor CRT Signal Canvas -->
+                <div class="crt-canvas-panel" id="sec-overview">
+                    <div class="crt-panel-header">
+                        <div class="crt-title-block">
+                            <span class="crt-title">MULTI-SPECTRAL RF TELEMETRY MATRIX</span>
+                            <span class="crt-subtitle">ESP32-S3 Synchronized 4-Signal Tracking &bull; Adaptive EWMA Envelopes (&plusmn;3&sigma;)</span>
+                        </div>
+                        <div class="crt-live-readout font-mono">
+                            <span class="dot-live"></span> SWEEP RATE: 1.0 Hz | ADAPTIVE DECAY &alpha;=0.90
+                        </div>
+                    </div>
+
+                    <!-- Canvas Container with Fine Coordinate Grid & Phosphor Backdrop -->
+                    <div class="crt-canvas-viewport">
+                        <canvas id="telemetryChart"></canvas>
+                    </div>
+
+                    <!-- Phosphor Signal Selector & Legend Strip -->
+                    <div class="crt-legend-toolbar">
+                        <label class="crt-channel-check">
+                            <input type="checkbox" id="chkTraceDeauth" checked>
+                            <span class="trace-swatch" style="background-color: var(--accent-sky);"></span>
+                            <span class="trace-name">DEAUTH FRAMES</span>
+                        </label>
+                        <label class="crt-channel-check">
+                            <input type="checkbox" id="chkTraceMgmt" checked>
+                            <span class="trace-swatch" style="background-color: var(--status-emerald);"></span>
+                            <span class="trace-name">WI-FI MGMT FRAMES</span>
+                        </label>
+                        <label class="crt-channel-check">
+                            <input type="checkbox" id="chkTraceBle" checked>
+                            <span class="trace-swatch" style="background-color: var(--status-amber);"></span>
+                            <span class="trace-name">BLE ADVERTS</span>
+                        </label>
+                        <label class="crt-channel-check">
+                            <input type="checkbox" id="chkTraceRogue" checked>
+                            <span class="trace-swatch" style="background-color: var(--status-rose);"></span>
+                            <span class="trace-name">ROGUE AP</span>
+                        </label>
+                        <label class="crt-channel-check">
+                            <input type="checkbox" id="chkTraceEnvelope" checked>
+                            <span class="trace-swatch envelope-swatch"></span>
+                            <span class="trace-name">&plusmn;3&sigma; EWMA ENVELOPE</span>
+                        </label>
+                        <div class="crt-legend-note font-mono">
+                            <span class="attack-span-dot"></span> LABELLED ATTACK SPAN
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Dock: Tactical MITRE ATT&CK & Signal Meters -->
+                <aside class="tactical-dock" id="sec-threat-intel">
+                    <div class="dock-section-title">TACTICAL MITRE ATT&amp;CK CORRELATION</div>
+
+                    <!-- Compact MITRE ATT&CK 4-Technique Grid -->
+                    <div class="mitre-workstation-grid">
+                        <div class="mitre-tile" id="cardMitreDeauth" data-tech="T1498.001" title="Network Denial of Service (Deauth Flood)">
+                            <div class="mitre-tile-id">T1498.001</div>
+                            <div class="mitre-tile-name">Network DoS</div>
+                            <div id="mitreHitsT1498" class="mitre-tile-hits font-mono">0</div>
+                        </div>
+                        <div class="mitre-tile" id="cardMitreMgmt" data-tech="T1499" title="Endpoint Denial of Service (Mgmt Frame Flood)">
+                            <div class="mitre-tile-id">T1499</div>
+                            <div class="mitre-tile-name">Endpoint DoS</div>
+                            <div id="mitreHitsT1499" class="mitre-tile-hits font-mono">0</div>
+                        </div>
+                        <div class="mitre-tile" id="cardMitreRogue" data-tech="T1584" title="Rogue Infrastructure (Evil-Twin AP)">
+                            <div class="mitre-tile-id">T1584</div>
+                            <div class="mitre-tile-name">Rogue AP</div>
+                            <div id="mitreHitsT1584" class="mitre-tile-hits font-mono">0</div>
+                        </div>
+                        <div class="mitre-tile" id="cardMitreBle" data-tech="T1557.001" title="Wireless Spoofing (BLE Flood)">
+                            <div class="mitre-tile-id">T1557.001</div>
+                            <div class="mitre-tile-name">BLE Spoof</div>
+                            <div id="mitreHitsT1557" class="mitre-tile-hits font-mono">0</div>
+                        </div>
+                    </div>
+
+                    <div class="dock-section-title" style="margin-top: 8px;">THREAT PROFILE &amp; SEVERITY DISTRIBUTION</div>
+
+                    <!-- Threat & Severity Distribution Bars -->
+                    <div class="threat-dual-breakdown">
+                        <div class="breakdown-col">
+                            <div class="breakdown-header">Threat Class</div>
+                            <div id="distThreatTypes" class="dist-list">
+                                <!-- Populated dynamically by wazuh_console.js -->
+                            </div>
+                        </div>
+                        <div class="breakdown-col">
+                            <div class="breakdown-header">Severity Profile</div>
+                            <div id="distSeverity" class="dist-list">
+                                <!-- Populated dynamically by wazuh_console.js -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Hidden helper targets for wazuh_console.js -->
+                    <div id="distSources" style="display: none;"></div>
+                    <canvas id="eventsHistogramCanvas" style="display: none;"></canvas>
+                    <span id="filterActiveRangeText" style="display: none;"></span>
+                </aside>
+            </div>
+        </section>
+
+        <!-- ====================================================
+             TAB PANEL 2: INCIDENT TRIAGE & DEFENSIVE PLAYBOOKS
+             ==================================================== -->
+        <section id="panel-incidents" class="tab-panel" role="tabpanel" aria-labelledby="tabIncidents">
+            <div class="triage-split-layout">
+                <!-- Left Pane: Dense Incidents Table -->
+                <div class="triage-table-pane" id="incidentsTableContainer">
+                    <div class="pane-toolbar">
+                        <div class="pane-title">CORRELATED INCIDENT TIMELINE</div>
+                        <div class="pane-actions">
+                            <button id="btnLearnEnvironment" class="tool-btn tool-btn-sm" title="Whitelist discovered SSIDs">Learn Safe APs</button>
+                            <button id="btnExportReport" class="tool-btn tool-btn-sm" title="Generate compliance report">Export Report</button>
+                        </div>
+                    </div>
+                    <div class="table-scroll-wrapper">
+                        <table class="workstation-table" id="incidentsTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 24px;"></th>
+                                    <th>Incident ID</th>
+                                    <th>Trigger Window</th>
+                                    <th>Classification</th>
+                                    <th>Severity</th>
+                                    <th>Attacker MAC</th>
+                                    <th>Signature / Reason</th>
+                                    <th>Proximity</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="incidentsTableBody">
+                                <!-- Populated by incidents.js -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Right Pane: Defensive Mitigation Playbook & Evidence Inspector -->
+                <div class="triage-playbook-pane" id="sec-incidents">
+                    <div class="pane-toolbar">
+                        <div class="pane-title">DEFENSIVE MITIGATION PLAYBOOK &amp; RAG EVIDENCE</div>
+                        <span id="evidenceEventTag" class="status-pill pill-low">EV-NONE</span>
+                    </div>
+
+                    <div class="playbook-scroll-wrapper">
+                        <!-- Playbook content injected by incidents.js -->
+                        <div id="defensivePlaybookContent" class="playbook-container">
+                            <div class="empty-state-text">
+                                Select an incident from the timeline table to inspect tactical playbooks, mitigation steps, and framework citations.
+                            </div>
+                        </div>
+
+                        <!-- Raw Evidence & Local Rule Rationale -->
+                        <div class="evidence-box-group">
+                            <div class="evidence-sub-header font-mono">MATHEMATICAL TELEMETRY EVIDENCE (RAW JSON)</div>
+                            <pre id="evidenceView" class="evidence-pre">// Awaiting incident selection</pre>
+                            
+                            <div class="evidence-sub-header font-mono" style="margin-top: 4px;">LOCAL INFERENCE &amp; DETECTOR RATIONALE</div>
+                            <div id="explanationView" class="explanation-box">// Local anomaly detector rule explanation</div>
+                        </div>
+
+                        <!-- Incident Forensic Verification Property Sheet -->
+                        <div class="incident-property-sheet" id="incidentPropertySheet" style="display: none;">
+                            <div class="property-sheet-header">INCIDENT FORENSIC PROPERTY SHEET</div>
+                            <table class="workstation-table property-sheet-table" id="incidentPropertyTable">
+                                <tbody>
+                                    <tr>
+                                        <td class="prop-label font-mono">MITRE ATT&amp;CK:</td>
+                                        <td id="propMitreAttack" class="prop-value font-mono text-muted">—</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="prop-label font-mono">SHA-256 EVIDENCE DIGEST:</td>
+                                        <td id="propEvidenceDigest" class="prop-value">
+                                            <div class="evidence-hash-box">
+                                                <span class="hash-label">DIGEST:</span>
+                                                <code class="mono-hash" id="hashDisplayVal">—</code>
+                                                <button class="btn btn-sm btn-copy-hash" id="btnCopyEvidenceHash" data-hash="" title="Copy SHA-256 Checksum">COPY SHA-256</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ====================================================
+             TAB PANEL 3: TELEMETRY LEDGER
+             ==================================================== -->
+        <section id="panel-telemetry" class="tab-panel" role="tabpanel" aria-labelledby="tabTelemetry">
+            <div class="ledger-layout" id="sec-telemetry">
+                <!-- Sub-tab switcher bar -->
+                <div class="ledger-subnav">
+                    <button class="subnav-tab active" id="tabShowTelemetry">Live Telemetry Stream</button>
+                    <button class="subnav-tab" id="tabShowAlerts">Anomaly Alerts Log</button>
+                    <button class="subnav-tab" id="tabShowTrustedAps">Trusted AP Allowlist</button>
+                </div>
+
+                <!-- View A: Raw Live Telemetry Stream Table -->
+                <div class="ledger-table-container" id="telemetryTableContainer">
+                    <div class="table-scroll-wrapper">
+                        <table class="workstation-table font-mono" id="rawTelemetryTable">
+                            <thead>
+                                <tr>
+                                    <th>Window ID</th>
+                                    <th>RSSI Avg</th>
+                                    <th>Z-Score Deviation</th>
+                                    <th>Deauth Rate</th>
+                                    <th>Statistical State</th>
+                                </tr>
+                            </thead>
+                            <tbody id="rawTelemetryBody">
+                                <!-- Populated dynamically by telemetry_table.js -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="ledger-pagination-bar" style="display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; background: var(--bg-panel); border-top: 1px solid var(--border-subtle); font-family: var(--font-mono); font-size: 10px;">
+                        <span id="ledgerPageInfo" style="color: var(--text-muted);">Showing latest windows in memory</span>
+                        <div style="display: flex; gap: 4px;">
+                            <button id="btnLedgerNewer" class="tool-btn" title="Load newer windows">&laquo; Newer</button>
+                            <button id="btnLedgerOlder" class="tool-btn" title="Load older windows from SQLite">Older &raquo;</button>
+                            <button id="btnLedgerLatest" class="tool-btn" title="Jump back to live stream">Live Head</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- View B: Anomaly Alerts Log Table -->
+                <div class="ledger-table-container" id="alertsTableContainer" style="display: none;">
+                    <div class="table-scroll-wrapper">
+                        <table class="workstation-table" id="alertsTable">
+                            <thead>
+                                <tr>
+                                    <th>Window #</th>
+                                    <th>Classification</th>
+                                    <th>Severity</th>
+                                    <th>Confidence</th>
+                                </tr>
+                            </thead>
+                            <tbody id="alertsTableBody">
+                                <!-- Populated dynamically by telemetry_table.js -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- View C: Trusted AP Allowlist Manager -->
+                <div class="ledger-table-container" id="trustedApsContainer" style="display: none;">
+                    <div class="trusted-aps-form">
+                        <input type="text" id="inputNewBssid" class="form-input font-mono" placeholder="BSSID (e.g. 00:11:22:33:44:55)">
+                        <input type="text" id="inputNewSsid" class="form-input" placeholder="SSID (e.g. Campus-Corp-Secure)">
+                        <input type="number" id="inputNewChannel" class="form-input font-mono" placeholder="Channel (1-14)" min="1" max="14">
+                        <button id="btnAddTrustedAp" class="tool-btn tool-btn-primary">+ Add Trusted AP</button>
+                    </div>
+                    <div class="table-scroll-wrapper">
+                        <table class="workstation-table font-mono" id="trustedApsTable">
+                            <thead>
+                                <tr>
+                                    <th>BSSID</th>
+                                    <th>SSID</th>
+                                    <th>Channel</th>
+                                    <th>Allowlist Status</th>
+                                    <th>First Discovered</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trustedApsTableBody">
+                                <!-- Populated by incidents.js -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ====================================================
+             TAB PANEL 4: BENCHMARK & SYSTEM EVALUATION
+             ==================================================== -->
+        <section id="panel-benchmark" class="tab-panel" role="tabpanel" aria-labelledby="tabBenchmark">
+            <div class="benchmark-layout" id="sec-benchmark-view">
+                <!-- Top Row: Primary Comparative Detector Performance Table -->
+                <div class="benchmark-primary-table">
+                    <div class="pane-toolbar">
+                        <div>
+                            <span class="pane-title">DETECTOR BENCHMARK EVALUATION (CHAPTER 6 PERFORMANCE ANALYSIS)</span>
+                            <span class="pane-subtitle">Comparative accuracy across Fixed Threshold, Adaptive EWMA, and NEXUS AI Engines</span>
+                        </div>
+                        <div class="benchmark-meta font-mono" id="benchmarkMeta">Evaluated windows: 0 | Labelled attack windows: 0</div>
+                    </div>
+
+                    <!-- Lab Mode Controls (Synthetic Bursts) -->
+                    <div class="actions-strip lab-only-control" style="margin-bottom: 6px;">
+                        <button id="btnLabelAttack" class="tool-btn">Label: Attack Running</button>
+                        <div id="syntheticActions" class="toolbar-group">
+                            <button id="btnInjectDeauth" class="tool-btn tool-btn-danger">Inject Deauth Burst</button>
+                            <button id="btnInjectRogue" class="tool-btn tool-btn-danger">Inject Rogue AP</button>
+                            <button id="btnInjectBle" class="tool-btn tool-btn-danger">Inject BLE Flood</button>
+                        </div>
+                    </div>
+
+                    <div class="table-scroll-wrapper" style="max-height: 140px;">
+                        <table class="workstation-table" id="benchmarkTable">
+                            <thead>
+                                <tr>
+                                    <th>Detector Configuration</th>
+                                    <th>Precision</th>
+                                    <th>Recall</th>
+                                    <th>F1-Score</th>
+                                    <th>FPR</th>
+                                    <th>Attacks Caught</th>
+                                    <th>Mean Latency</th>
+                                </tr>
+                            </thead>
+                            <tbody id="benchmarkTableBody">
+                                <!-- Dynamically populated by app.js -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Fallback backward-compatibility targets -->
+                    <div id="evalSummaryFootnote" style="display: none;"></div>
+                    <table style="display: none;"><tbody id="detectorComparisonBody"></tbody></table>
+                </div>
+
+                <!-- Bottom Row: Threshold Sweep Curve & Architectural Ablation Study -->
+                <div class="benchmark-dual-row">
+                    <!-- Left: Empirical Threshold Sweep Canvas -->
+                    <div class="benchmark-box">
+                        <div class="pane-toolbar">
+                            <div>
+                                <span class="pane-title">EMPIRICAL THRESHOLD SWEEP CURVE</span>
+                                <span class="pane-subtitle">Precision vs. Recall optimization justifying Z = 3.5&sigma;</span>
+                            </div>
+                            <button class="tool-btn tool-btn-sm" id="btnRunSweep">Run Sweep</button>
+                        </div>
+                        <div class="threshold-chart-wrapper">
+                            <canvas id="thresholdSweepCanvas"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Right: Architectural Ablation Study Matrix -->
+                    <div class="benchmark-box">
+                        <div class="pane-toolbar">
+                            <div>
+                                <span class="pane-title">ARCHITECTURAL ABLATION STUDY</span>
+                                <span class="pane-subtitle">Quantified contribution of individual pipeline layers</span>
+                            </div>
+                        </div>
+                        <div class="table-scroll-wrapper">
+                            <table class="workstation-table" id="ablationTable">
+                                <thead>
+                                    <tr>
+                                        <th>Architecture Variant</th>
+                                        <th>F1-Score</th>
+                                        <th>FPR</th>
+                                        <th>Relative Gain</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Fixed Threshold Only</td>
+                                        <td id="ablFixedF1" class="font-mono">0.68</td>
+                                        <td id="ablFixedFpr" class="font-mono">0.03</td>
+                                        <td>Baseline</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Adaptive Baseline (No Freeze)</td>
+                                        <td id="ablNoFreezeF1" class="font-mono">0.74</td>
+                                        <td id="ablNoFreezeFpr" class="font-mono">0.05</td>
+                                        <td style="color: var(--accent-sky);" class="font-mono">+8.8%</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Adaptive + Baseline Freeze</td>
+                                        <td id="ablFreezeF1" class="font-mono">0.90</td>
+                                        <td id="ablFreezeFpr" class="font-mono">0.04</td>
+                                        <td style="color: var(--status-emerald);" class="font-mono">+32.3%</td>
+                                    </tr>
+                                    <tr>
+                                        <td>NEXUS AI (Adaptive + Freeze + Corr)</td>
+                                        <td id="ablFullF1" class="font-mono font-bold">0.96</td>
+                                        <td id="ablNexusFpr" class="font-mono">0.01</td>
+                                        <td style="color: var(--status-emerald); font-weight: 700;" class="font-mono">+41.1%</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ====================================================
+             TAB PANEL 5: SETTINGS & HARDWARE CONFIGURATION
+             ==================================================== -->
+        <section id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tabSettings">
+            <div class="settings-layout" id="sec-settings-view">
+                <div class="pane-toolbar">
+                    <div>
+                        <span class="pane-title">PLATFORM CONFIGURATION &amp; MATHEMATICAL HYPERPARAMETERS</span>
+                        <span class="pane-subtitle">Manage local inference engines, data retention, and adaptive EWMA statistical parameters</span>
+                    </div>
+                    <button id="btnSaveSettings" class="tool-btn tool-btn-primary">Save Configuration</button>
+                </div>
+
+                <div class="settings-form-grid">
+                    <!-- Column 1: Statistical Hyperparameters -->
+                    <div class="workstation-groupbox">
+                        <div class="groupbox-title">EWMA Detection Hyperparameters</div>
+                        <div class="form-row">
+                            <label for="inputAlpha">EWMA Alpha (&alpha; decay rate)</label>
+                            <input type="number" id="inputAlpha" class="form-input font-mono" value="0.9" step="0.05" min="0.1" max="0.99">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputZScore">Z-Score Cutoff Threshold (Z)</label>
+                            <input type="number" id="inputZScore" class="form-input font-mono" value="3.5" step="0.1" min="1.0" max="10.0">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputFixedThreshold">Fixed Deauth Burst Cutoff</label>
+                            <input type="number" id="inputFixedThreshold" class="form-input font-mono" value="5" min="1" max="100">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputWarmup">Warm-up Convergence Windows (N)</label>
+                            <input type="number" id="inputWarmup" class="form-input font-mono" value="30" min="5" max="300">
+                        </div>
+                    </div>
+
+                    <!-- Column 2: Storage & Ingest Policies -->
+                    <div class="workstation-groupbox">
+                        <div class="groupbox-title">System Retention &amp; Storage Controls</div>
+                        <div class="form-row">
+                            <label for="inputMaxWindows">Max In-Memory Telemetry Windows</label>
+                            <input type="number" id="inputMaxWindows" class="form-input font-mono" value="500" min="100" max="5000">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputPruneDays">Data Pruning Retention (Days)</label>
+                            <input type="number" id="inputPruneDays" class="form-input font-mono" value="7" min="1" max="90">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputSqliteJournal">SQLite Journal Mode</label>
+                            <input type="text" id="inputSqliteJournal" class="form-input font-mono" value="WAL Mode (PRAGMA journal_mode=WAL)" readonly>
+                        </div>
+                        <div class="form-row">
+                            <label for="inputSqliteSync">Synchronous Pragma</label>
+                            <input type="text" id="inputSqliteSync" class="form-input font-mono" value="NORMAL (PRAGMA synchronous=NORMAL)" readonly>
+                        </div>
+                        <div class="form-row">
+                            <label for="inputSqliteDbSize">Database Byte Size</label>
+                            <input type="text" id="inputSqliteDbSize" class="form-input font-mono" value="-- bytes" readonly>
+                        </div>
+                    </div>
+
+                    <!-- Column 3: Local LLM & RAG Engine -->
+                    <div class="workstation-groupbox">
+                        <div class="groupbox-title">Local Ollama Inference Engine</div>
+                        <div class="form-row">
+                            <label for="inputLlmUrl">Ollama Endpoint URL</label>
+                            <input type="text" id="inputLlmUrl" class="form-input font-mono" value="http://localhost:11434">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputLlmModel">Ollama Model</label>
+                            <input type="text" id="inputLlmModel" class="form-input font-mono" value="llama3.2">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputApiKey">Inference API Key (Optional)</label>
+                            <input type="password" id="inputApiKey" class="form-input font-mono" placeholder="Bearer token">
+                        </div>
+                        <div class="form-row" style="margin-top: 10px;">
+                            <button id="btnTestLlmConnection" class="tool-btn" style="width: 100%;">Test Endpoint Connection</button>
+                        </div>
+                        <div class="form-row" id="llmStatusContainer" style="margin-top: 6px; display: none;">
+                            <div id="llmStatusBox" class="sunken-panel font-mono" style="padding: 4px 8px; font-size: 11px; border: 1px inset #111; background: #141416; width: 100%;">
+                                <span id="llmStatusText">Ready</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Column 4: RF Duty Cycle & Scanning Strategy -->
+                    <div class="workstation-groupbox" id="groupboxScanStrategy">
+                        <div class="groupbox-title">RF Duty Cycle &amp; Scanning Strategy</div>
+                        <div class="form-row">
+                            <label for="selectScanMode">Scanning Strategy Mode</label>
+                            <select id="selectScanMode" class="form-input font-mono">
+                                <option value="adaptive" selected>Adaptive Tiered (85% Priority / 15% Patrol)</option>
+                                <option value="round_robin">Uniform Round-Robin (1–13)</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label for="selectPrimaryChannel">Primary Target Channel</label>
+                            <select id="selectPrimaryChannel" class="form-input font-mono">
+                                <option value="auto" selected>Auto-detected (Highest BSSID / Mgmt Frame Density)</option>
+                                <option value="1">Channel 1 (2.412 GHz)</option>
+                                <option value="2">Channel 2 (2.417 GHz)</option>
+                                <option value="3">Channel 3 (2.422 GHz)</option>
+                                <option value="4">Channel 4 (2.427 GHz)</option>
+                                <option value="5">Channel 5 (2.432 GHz)</option>
+                                <option value="6">Channel 6 (2.437 GHz)</option>
+                                <option value="7">Channel 7 (2.442 GHz)</option>
+                                <option value="8">Channel 8 (2.447 GHz)</option>
+                                <option value="9">Channel 9 (2.452 GHz)</option>
+                                <option value="10">Channel 10 (2.457 GHz)</option>
+                                <option value="11">Channel 11 (2.462 GHz)</option>
+                                <option value="12">Channel 12 (2.467 GHz)</option>
+                                <option value="13">Channel 13 (2.472 GHz)</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label>Dwell Allocation (Primary / Patrol)</label>
+                            <input type="text" id="inputDwellTiming" class="form-input font-mono" value="1700ms Primary (85%) / 50ms Off-Ch (15%)" readonly>
+                        </div>
+                        <div style="display: flex; justify-content: center; width: 100%; margin-top: 8px;">
+                            <button id="btnDeployScanPlan" class="tool-btn tool-btn-primary" style="width: 100%; max-width: 280px; text-align: center;">Deploy Scan Plan</button>
+                        </div>
+                    </div>
+
+                    <!-- Column 5: Onboard NVS Flash AP Whitelist -->
+                    <div class="workstation-groupbox" id="groupboxNvsWhitelist">
+                        <div class="groupbox-title">Onboard NVS Flash AP Whitelist (Autonomous Rogue AP Filter)</div>
+                        <div class="table-scroll-wrapper" style="max-height: 120px; border: 1px solid var(--border-subtle); margin-bottom: 6px;">
+                            <table class="workstation-table" id="tableNvsWhitelist">
+                                <thead>
+                                    <tr>
+                                        <th>SSID</th>
+                                        <th>BSSID (MAC)</th>
+                                        <th style="width: 40px; text-align: center;">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="nvsWhitelistBody">
+                                    <!-- Populated by app.js -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="form-row">
+                            <label for="inputWhitelistSsid">Trusted Network SSID</label>
+                            <input type="text" id="inputWhitelistSsid" class="form-input font-mono" placeholder="e.g. Campus-Corp-Secure">
+                        </div>
+                        <div class="form-row">
+                            <label for="inputWhitelistBssid">Authorized BSSID (MAC Address)</label>
+                            <input type="text" id="inputWhitelistBssid" class="form-input font-mono" placeholder="00:14:2D:E1:92:40">
+                        </div>
+                        <div style="display: flex; gap: 6px; margin-top: 8px;">
+                            <button id="btnCommitWhitelist" class="tool-btn tool-btn-primary" style="flex: 1;" title="Commit whitelist entry to ESP32 Non-Volatile Storage">Commit to ESP32 Flash</button>
+                            <button id="btnPurgeWhitelist" class="tool-btn" style="flex: 1;" title="Clear all whitelisted networks from device NVS">Purge Device NVS</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ========================================================
+         5. PERMANENT SUNKEN STATUS BAR (Bottom of Screen)
+         ======================================================== -->
+    <footer class="sunken-status-bar" role="status" aria-label="Hardware & Pipeline Status">
+        <!-- Panel 1: Hardware Node State -->
+        <div class="status-panel panel-link" id="statusPanelLink">
+            <span class="status-panel-indicator status-panel-dot-sky"></span>
+            <span id="statusNode" class="status-panel-val text-sky">NODE: SIMULATION | ROUND-ROBIN</span>
+            <span id="kpiLinkStatus" style="display: none;">SIMULATION</span>
+            <span class="status-panel-divider">|</span>
+            <span id="kpiLinkBaud" class="status-panel-sub font-mono">115200 8-N-1 | DROPS: 0 | ERRORS: 0</span>
+        </div>
+
+        <!-- Panel 2: Threat Status -->
+        <div class="status-panel panel-threat" id="statusPanelThreat">
+            <span class="status-panel-title">THREAT:</span>
+            <span id="kpiThreatLevel" class="status-panel-val text-emerald">NORMAL</span>
+            <span class="status-panel-divider">|</span>
+            <span id="kpiThreatDesc" class="status-panel-sub">ZERO CORRELATED ANOMALIES</span>
+        </div>
+
+        <!-- Panel 3: Baseline State -->
+        <div class="status-panel panel-baseline" id="statusPanelBaseline">
+            <span class="status-panel-title">BASELINE:</span>
+            <span id="kpiBaselineState" class="status-panel-val text-amber">WARMUP [0/30]</span>
+            <span class="status-panel-divider">|</span>
+            <span id="kpiBaselineSubtext" class="status-panel-sub">CONVERGING DISTRIBUTIONS</span>
+        </div>
+
+        <!-- Panel 4: Telemetry Stats & Incident Counters -->
+        <div class="status-panel panel-stats" id="statusPanelStats">
+            <span class="status-panel-title">TELEMETRY:</span>
+            <span id="statusTelemetry" class="status-panel-sub font-mono">
+                RX: <span id="metricWindowsProcessed" class="font-bold">0</span> wins |
+                Incidents: <span id="kpiOpenIncidents" class="font-bold">0</span> (<span id="kpiIncidentBadge">0 UNACK</span>) |
+                Alerts: <span id="metricAlertCount" class="font-bold">0</span> |
+                NFC: <span id="metricNfcReads" class="font-bold">0</span>
+            </span>
+            <span class="status-panel-divider">|</span>
+            <span id="nfcActivityBadge" class="status-indicator font-mono">NFC: IDLE</span>
+            <span class="status-panel-divider">|</span>
+            <span id="statusNvsWhitelist" class="status-indicator font-mono">NVS WL: 1 ACTIVE</span>
+            <span class="status-panel-divider">|</span>
+            <button id="btnAudioToggle" class="status-btn" title="Toggle Synthetic Audio Radar Threat Chirps">SND: OFF</button>
+        </div>
+    </footer>
+
+    <!-- ========================================================
+         6. FLOATING / DOCKED "ASK NEXUS" AI ASSISTANT DRAWER
+         ======================================================== -->
+    <aside id="askNexusDrawer" class="workstation-drawer" aria-label="Ask NEXUS Copilot">
+        <div class="drawer-header">
+            <div class="drawer-title-group">
+                <span class="drawer-icon">&#x25C8;</span>
+                <div>
+                    <div class="drawer-title">ASK NEXUS COPILOT</div>
+                    <div class="drawer-subtitle font-mono">Local RAG &bull; Anomaly Forensics</div>
+                </div>
+            </div>
+            <div class="drawer-controls">
+                <button id="btnAssistantClear" class="tool-btn tool-btn-sm" title="Clear chat history">&#x21BB;</button>
+                <button id="btnCloseAssistant" class="tool-btn tool-btn-sm" title="Close drawer">&times;</button>
+            </div>
+        </div>
+
+        <!-- Suggested Queries Strip -->
+        <div class="assistant-chips-container" id="assistantChips"></div>
+
+        <!-- Message Stream Viewport -->
+        <div class="assistant-messages-container font-mono" id="assistantMessages"></div>
+
+        <!-- Prompt Input Bar -->
+        <div class="assistant-input-bar">
+            <input type="text" id="assistantInput" class="form-input font-mono" placeholder="Query link health, deauth rates, or anomaly rationale..." autocomplete="off">
+            <button id="btnAssistantSend" class="tool-btn tool-btn-primary">Send</button>
+        </div>
+    </aside>
+
+    <!-- Slide-Over Forensic Event Inspector Drawer -->
+    <div id="eventFlyoutDrawer" class="flyout-drawer">
+        <div class="flyout-header">
+            <div>
+                <div class="flyout-title">EVENT FORENSIC INSPECTOR</div>
+                <div class="flyout-subtitle font-mono">Deep-Dive Signal Verification</div>
+            </div>
+            <button id="btnCloseFlyout" class="tool-btn tool-btn-sm" title="Close flyout inspector">&times;</button>
+        </div>
+        <div id="flyoutContent" class="flyout-content font-mono"></div>
+    </div>
+
+    <!-- Floating Toast Notifications Container -->
+    <div id="nexusToastContainer" class="toast-container font-mono"></div>
+
+    <!-- Two-Step Reset Confirmation Modal -->
+    <div id="resetConfirmModal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-title">&#x26A0; Purge Database &amp; Baselines?</div>
+            <div class="modal-body">
+                Are you sure you want to purge all telemetry history, running baselines, and recorded incidents? This operation completely resets the statistical pipeline.
+            </div>
+            <div class="modal-actions">
+                <button id="btnCancelResetModal" class="tool-btn">Cancel</button>
+                <button id="btnConfirmResetModal" class="tool-btn tool-btn-danger">Confirm Purge</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Win32 Executive Incident Compliance Report Modal -->
+    <div id="modalReportViewer" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog report-modal-dialog">
+            <div class="modal-header">
+                <span class="modal-title">&#x1F4C4; DEFENSIVE INCIDENT COMPLIANCE REPORT &bull; NEXUS AI</span>
+                <button class="modal-close" id="btnCloseReportModal">&times;</button>
+            </div>
+            <div class="modal-body report-modal-body">
+                <div id="reportLoadingIndicator" class="report-loading-box" style="display: none;">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 10px; font-weight: 500;">Synthesizing Executive Compliance Report via Llama 3.2...</div>
+                </div>
+                <div id="reportMarkdownContainer" class="report-document-paper"></div>
+            </div>
+            <div class="modal-footer report-modal-footer">
+                <button class="btn btn-sm" id="btnCopyReportMarkdown">Copy Markdown</button>
+                <button class="btn btn-sm" id="btnDownloadReportMd">&#x2913; Save as .MD</button>
+                <button class="btn btn-sm btn-primary" id="btnPrintCleanReport">&#x2399; Print Clean PDF</button>
+                <button class="btn btn-sm" id="btnDismissReportModal">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Win32 System Specifications Modal -->
+    <div id="modalSysSpecs" class="modal-backdrop" style="display: none;">
+        <div class="modal-card sys-specs-modal-card">
+            <div class="modal-title" style="color: var(--accent-sky); display: flex; justify-content: space-between; align-items: center;">
+                <span>&#x2699; HARDWARE &amp; ARCHITECTURE SPECIFICATIONS</span>
+                <button class="modal-close" id="btnCloseSysSpecsModal">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 0;">
+                <table class="specs-table font-mono">
+                    <tbody>
+                        <tr><td>TARGET HARDWARE</td><td>ESP32-S3 (N16R8, Dual Xtensa LX7 @ 240MHz)</td></tr>
+                        <tr><td>STORAGE &amp; RAM</td><td>16MB Quad-SPI Flash &bull; 8MB Octal PSRAM</td></tr>
+                        <tr><td>FREERTOS HEAP</td><td id="specFreeRtosHeap">5,242,880 bytes free (Octal PSRAM)</td></tr>
+                        <tr><td>UART LINK / BAUD</td><td id="specUartLink">115200 baud (8-N-1 Web Serial)</td></tr>
+                        <tr><td>SQLITE JOURNAL MODE</td><td id="specSqliteJournal">WAL Mode (PRAGMA journal_mode=WAL)</td></tr>
+                        <tr><td>SQLITE SYNCHRONOUS</td><td id="specSqliteSync">NORMAL (PRAGMA synchronous=NORMAL)</td></tr>
+                        <tr><td>ACTIVE RF CHANNEL</td><td id="specActiveChannel">Channel 6 (Auto-detected 2.437 GHz)</td></tr>
+                        <tr><td>RF SNIFFER CORES</td><td>Core 0: Promiscuous ISR &bull; Core 1: EWMA Pipeline</td></tr>
+                        <tr><td>CONNECTION STATE</td><td id="specConnectionState">SIMULATION_LOOP</td></tr>
+                        <tr><td>PROCESSED WINDOWS</td><td id="specProcessedWindows">0 windows</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="modal-actions" style="margin-top: 10px;">
+                <button id="btnDismissSysSpecsModal" class="tool-btn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reusable Win32 Property Dialog Template -->
+    <div id="win32Modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card win32-modal-card">
+            <div class="modal-title win32-modal-title">
+                <span id="win32ModalTitle">System Property Dialog</span>
+                <button class="modal-close" id="btnWin32ModalClose">&times;</button>
+            </div>
+            <div class="modal-body win32-modal-body" id="win32ModalBody">
+                <!-- Sunken content pane populated dynamically -->
+            </div>
+            <div class="modal-actions win32-modal-actions">
+                <button id="btnWin32ModalOk" class="tool-btn tool-btn-primary" style="min-width: 75px;">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Core Subsystems & Application Coordinator Scripts -->
+    <script src="js/chart.js"></script>
+    <script src="js/serial.js"></script>
+    <script src="js/incidents.js"></script>
+    <script src="js/assistant.js"></script>
+    <script src="js/wazuh_console.js"></script>
+    <script src="js/telemetry_table.js"></script>
+    <script src="js/settings.js"></script>
+    <script src="js/evaluation.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
