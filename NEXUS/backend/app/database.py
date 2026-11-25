@@ -22,13 +22,14 @@ def get_connection(db_mode: str = "live", db_path: Optional[str] = None) -> sqli
 
     target_file = Path(target_path)
     target_file.parent.mkdir(parents=True, exist_ok=True)
-    needs_sim_init = is_sim_mode and (not target_file.exists() or target_file.stat().st_size == 0)
+    needs_init = (db_path is None) and (not target_file.exists() or target_file.stat().st_size == 0)
 
-    if needs_sim_init:
+    if needs_init:
         init_db(db_path=target_path)
 
-    conn = sqlite3.connect(target_path, check_same_thread=False)
+    conn = sqlite3.connect(target_path, timeout=10, check_same_thread=False)
     conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
@@ -39,6 +40,7 @@ def init_db(db_path: str = DB_PATH) -> None:
     conn = get_connection(db_path=db_path)
     try:
         conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.commit()
@@ -90,10 +92,14 @@ def fetch_sqlite_pragmas(conn: Optional[sqlite3.Connection] = None) -> Dict[str,
         cursor.execute("PRAGMA foreign_keys;")
         foreign_keys = cursor.fetchone()[0]
 
+        cursor.execute("PRAGMA busy_timeout;")
+        busy_timeout = cursor.fetchone()[0]
+
         return {
             "journal_mode": str(journal_mode).lower(),
             "synchronous": int(synchronous),
-            "foreign_keys": int(foreign_keys)
+            "foreign_keys": int(foreign_keys),
+            "busy_timeout": int(busy_timeout)
         }
     finally:
         if close_on_exit:
@@ -115,6 +121,9 @@ def fetch_database_status(conn: Optional[sqlite3.Connection] = None) -> Dict[str
 
         cursor.execute("PRAGMA foreign_keys;")
         foreign_keys = int(cursor.fetchone()[0])
+
+        cursor.execute("PRAGMA busy_timeout;")
+        busy_timeout = int(cursor.fetchone()[0])
 
         cursor.execute("PRAGMA page_count;")
         page_count = int(cursor.fetchone()[0])
@@ -141,6 +150,7 @@ def fetch_database_status(conn: Optional[sqlite3.Connection] = None) -> Dict[str
             "synchronous": synchronous,
             "synchronous_str": sync_str,
             "foreign_keys": foreign_keys,
+            "busy_timeout": busy_timeout,
             "size_bytes": database_bytes,
             "telemetry_rows": telemetry_windows_count,
             "incident_rows": incidents_count,
@@ -167,23 +177,50 @@ def apply_migrations(db_path: str = DB_PATH) -> None:
     try:
         cursor = conn.cursor()
         cursor.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations ("
+            "  version INTEGER PRIMARY KEY,"
+            "  filename TEXT,"
+            "  applied_epoch_ms INTEGER NOT NULL"
+            ");"
+        )
+        cursor.execute(
             "CREATE TABLE IF NOT EXISTS schema_versions ("
             "  version INTEGER PRIMARY KEY,"
             "  filename TEXT,"
             "  applied_epoch_ms INTEGER NOT NULL"
             ");"
         )
+        cursor.execute("PRAGMA table_info(schema_migrations);")
+        mig_cols = {row["name"] for row in cursor.fetchall()}
+        if "filename" not in mig_cols:
+            cursor.execute("ALTER TABLE schema_migrations ADD COLUMN filename TEXT;")
+
         cursor.execute("PRAGMA table_info(schema_versions);")
-        cols = {row["name"] for row in cursor.fetchall()}
-        if "filename" not in cols:
+        ver_cols = {row["name"] for row in cursor.fetchall()}
+        if "filename" not in ver_cols:
             cursor.execute("ALTER TABLE schema_versions ADD COLUMN filename TEXT;")
 
-        cursor.execute("SELECT version, filename FROM schema_versions ORDER BY version ASC;")
+        cursor.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, filename, applied_epoch_ms) "
+            "SELECT version, filename, applied_epoch_ms FROM schema_versions;"
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO schema_versions (version, filename, applied_epoch_ms) "
+            "SELECT version, filename, applied_epoch_ms FROM schema_migrations;"
+        )
+
+        cursor.execute("SELECT version, filename FROM schema_migrations ORDER BY version ASC;")
         applied_rows = cursor.fetchall()
         applied_versions = {row["version"] for row in applied_rows}
         applied_filenames = {row["filename"] for row in applied_rows if row["filename"]}
 
-        migration_files = sorted(Path(MIGRATIONS_DIR).glob("*.sql"))
+        def migration_sort_key(p: Path) -> int:
+            try:
+                return int(p.name.split("_")[0])
+            except (ValueError, IndexError):
+                return 999999
+
+        migration_files = sorted(Path(MIGRATIONS_DIR).glob("*.sql"), key=migration_sort_key)
         for file_path in migration_files:
             filename = file_path.name
             version_num = int(filename.split("_")[0])
@@ -198,11 +235,18 @@ def apply_migrations(db_path: str = DB_PATH) -> None:
                         if "duplicate column name" in err_msg or "already exists" in err_msg:
                             continue
                         raise
+                now_epoch = int(time.time() * 1000)
+                cursor.execute(
+                    "INSERT INTO schema_migrations (version, filename, applied_epoch_ms) "
+                    "VALUES (?, ?, ?) "
+                    "ON CONFLICT(version) DO UPDATE SET filename = excluded.filename, applied_epoch_ms = excluded.applied_epoch_ms;",
+                    (version_num, filename, now_epoch)
+                )
                 cursor.execute(
                     "INSERT INTO schema_versions (version, filename, applied_epoch_ms) "
                     "VALUES (?, ?, ?) "
                     "ON CONFLICT(version) DO UPDATE SET filename = excluded.filename, applied_epoch_ms = excluded.applied_epoch_ms;",
-                    (version_num, filename, int(time.time() * 1000))
+                    (version_num, filename, now_epoch)
                 )
                 applied_versions.add(version_num)
                 applied_filenames.add(filename)
@@ -1322,6 +1366,13 @@ def insert_incident(
         is_laa_randomized = int(incident_dict.get("is_laa_randomized", 0))
         hardware_profile = str(incident_dict.get("hardware_profile") or "UNKNOWN")
         remediation_advisory = str(incident_dict.get("remediation_advisory") or "")
+        remediation_steps_raw = incident_dict.get("remediation_steps", "[]")
+        if isinstance(remediation_steps_raw, (list, dict)):
+            remediation_steps = json.dumps(remediation_steps_raw)
+        else:
+            remediation_steps = str(remediation_steps_raw or "[]")
+        updated_at = int(incident_dict.get("updated_at") or last_epoch_ms or now_ms)
+
         mitre_technique_id = str(incident_dict.get("mitre_technique_id") or incident_dict.get("technique_id") or "T1200")
         mitre_technique_name = str(incident_dict.get("mitre_technique_name") or incident_dict.get("technique_name") or "")
         mitre_tactic = str(incident_dict.get("mitre_tactic") or incident_dict.get("tactic") or "")
@@ -1356,8 +1407,9 @@ def insert_incident(
             "  target_bssid, analyst_notes, "
             "  attacker_mac, target_mac, attacker_rssi, tool_signature, deauth_reason, proximity_zone, "
             "  raw_injection_count, is_laa_randomized, hardware_profile, remediation_advisory, "
-            "  mitre_technique_id, mitre_technique_name, mitre_tactic, evidence_hash"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "  mitre_technique_id, mitre_technique_name, mitre_tactic, evidence_hash, "
+            "  remediation_steps, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             (
                 inc_id, start_window, last_window, start_epoch_ms, last_epoch_ms,
                 title, primary_type, severity, confidence, status, event_count, signals_involved_json,
@@ -1365,7 +1417,8 @@ def insert_incident(
                 target_bssid, analyst_notes,
                 attacker_mac, target_mac, attacker_rssi, tool_signature, deauth_reason, proximity_zone,
                 raw_injection_count, is_laa_randomized, hardware_profile, remediation_advisory,
-                mitre_technique_id, mitre_technique_name, mitre_tactic, evidence_hash
+                mitre_technique_id, mitre_technique_name, mitre_tactic, evidence_hash,
+                remediation_steps, updated_at
             )
         )
 
@@ -1433,14 +1486,15 @@ def update_incident(
             "tool_signature", "deauth_reason", "proximity_zone", "associated_event_ids_json",
             "signals_involved_json", "raw_injection_count", "is_laa_randomized",
             "hardware_profile", "remediation_advisory",
-            "mitre_technique_id", "mitre_technique_name", "mitre_tactic", "evidence_hash"
+            "mitre_technique_id", "mitre_technique_name", "mitre_tactic", "evidence_hash",
+            "remediation_steps", "updated_at"
         }
 
         set_clauses: List[str] = []
         params: List[Any] = []
         for k, v in merged_updates.items():
             if k in allowed_fields:
-                if k in ("associated_event_ids_json", "signals_involved_json") and isinstance(v, (list, dict)):
+                if k in ("associated_event_ids_json", "signals_involved_json", "remediation_steps") and isinstance(v, (list, dict)):
                     v = json.dumps(v)
                 if k in ("attacker_mac", "target_mac", "target_bssid") and v is not None:
                     v = str(v).strip().upper()

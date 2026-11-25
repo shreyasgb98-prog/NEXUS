@@ -124,29 +124,41 @@ class NexusApp {
         };
         this.recentFlags = [];
 
-        // Subsystems
-        this.chart = new TelemetryChart('telemetryChart');
-        this.incidentManager = new IncidentManager();
-        this.assistant = new NexusAssistant();
-        this.wazuhConsole = new WazuhConsoleManager();
+        // Subsystems (guarded so an optional element or offline endpoint never halts init)
+        try { this.chart = new TelemetryChart('telemetryChart'); } catch (e) { this.chart = null; }
+        try { this.incidentManager = new IncidentManager(); } catch (e) { this.incidentManager = null; }
+        try { this.assistant = new NexusAssistant(); } catch (e) { this.assistant = null; }
+        try { this.wazuhConsole = new WazuhConsoleManager(); } catch (e) { this.wazuhConsole = null; }
 
-        this.tableManager = new TelemetryTableManager({
-            telemetryTbodyId: 'rawTelemetryBody',
-            alertsTbodyId: 'alertsTableBody',
-            evidenceContainerId: 'evidenceView',
-            explanationContainerId: 'explanationView',
-            eventTagId: 'evidenceEventTag',
-            comparisonTbodyId: 'detectorComparisonBody',
-            evalFootnoteId: 'evalSummaryFootnote'
-        });
+        try {
+            this.tableManager = new TelemetryTableManager({
+                telemetryTbodyId: 'rawTelemetryBody',
+                alertsTbodyId: 'alertsTableBody',
+                evidenceContainerId: 'evidenceView',
+                explanationContainerId: 'explanationView',
+                eventTagId: 'evidenceEventTag',
+                comparisonTbodyId: 'detectorComparisonBody',
+                evalFootnoteId: 'evalSummaryFootnote'
+            });
+        } catch (e) {
+            this.tableManager = null;
+        }
 
-        this.serialReceiver = new WebSerialReceiver({
-            onWindow: (payload) => this.handleTelemetryWindow(payload, 'live (serial)'),
-            onStateChange: (state) => this.handleSerialStateChange(state),
-            onError: (errInfo) => this.handleSerialError(errInfo)
-        });
+        try {
+            this.serialReceiver = new WebSerialReceiver({
+                onWindow: (payload) => this.handleTelemetryWindow(payload, 'live (serial)'),
+                onStateChange: (state) => this.handleSerialStateChange(state),
+                onError: (errInfo) => this.handleSerialError(errInfo)
+            });
+        } catch (e) {
+            this.serialReceiver = null;
+        }
 
         this.initDOM();
+    }
+
+    getApiBase() {
+        return window.location.port === '8000' ? '' : 'http://127.0.0.1:8000';
     }
 
     initDOM() {
@@ -1018,23 +1030,23 @@ class NexusApp {
                     btn.style.borderColor = '#22c55e';
                 }
             } else {
-                const errorMsg = `Ollama Offline: ${data.error || 'Connection refused'}`;
+                const errorMsg = `AI Offline (Rule-Based Fallback Active): ${data.error || 'Connection refused'}`;
                 if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('ENDPOINT OFFLINE', errorMsg, 'error');
+                    this.wazuhConsole.showToast('AI OFFLINE', errorMsg, 'error');
                 }
                 if (btn) {
-                    btn.textContent = 'OFFLINE / FAILED';
+                    btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
                     btn.style.color = '#ef4444';
                     btn.style.borderColor = '#ef4444';
                 }
             }
         } catch (err) {
-            const errorMsg = `Ollama Offline: ${err.message || 'Connection refused'}`;
+            const errorMsg = `AI Offline (Rule-Based Fallback Active): ${err.message || 'Connection refused'}`;
             if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('ENDPOINT OFFLINE', errorMsg, 'error');
+                this.wazuhConsole.showToast('AI OFFLINE', errorMsg, 'error');
             }
             if (btn) {
-                btn.textContent = 'OFFLINE / FAILED';
+                btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
                 btn.style.color = '#ef4444';
                 btn.style.borderColor = '#ef4444';
             }
@@ -1201,6 +1213,10 @@ class NexusApp {
                             flag_nexus: Boolean(w.flag_nexus)
                         };
                         this.allWindows.push(windowRecord);
+        const maxWinCap = parseInt(document.getElementById('inputMaxWindows')?.value || '500', 10) || 500;
+        if (this.allWindows.length > maxWinCap) {
+            this.allWindows.shift();
+        }
 
                         if (this.chart && typeof this.chart.addMultiPoint === 'function') {
                             this.chart.addMultiPoint({
@@ -1894,6 +1910,9 @@ class NexusApp {
             };
 
             this.allEvents.push(alertRecord);
+            if (this.allEvents.length > 500) {
+                this.allEvents.shift();
+            }
             this.tableManager.addAlertEvent(alertRecord);
 
             // Hook Incident Management Workflow & Audio Alerts
@@ -1946,6 +1965,10 @@ class NexusApp {
             flag_nexus: flagNexus
         };
         this.allWindows.push(windowRecord);
+        const maxWinCap = parseInt(document.getElementById('inputMaxWindows')?.value || '500', 10) || 500;
+        if (this.allWindows.length > maxWinCap) {
+            this.allWindows.shift();
+        }
 
         // Asynchronously dispatch window to backend SQLite database
         this.syncWindowToBackend(windowRecord);
@@ -2849,5 +2872,9 @@ class NexusApp {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-    window.nexusApp = new NexusApp();
+    try {
+        window.nexusApp = new NexusApp();
+    } catch (err) {
+        console.error('[NEXUS] Initialization error:', err);
+    }
 });

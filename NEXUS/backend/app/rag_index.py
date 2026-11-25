@@ -1,11 +1,14 @@
 import os
 import json
+import logging
 import math
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 from .config import KNOWLEDGE_CORPUS_PATH, RAG_INDEX_DIR
+
+logger = logging.getLogger("nexus.rag")
 
 class DefensiveRAGIndex:
     """Local vector search index for defensive security guidance with pure NumPy and TF-IDF fallback."""
@@ -34,9 +37,15 @@ class DefensiveRAGIndex:
 
     def _load_corpus(self) -> None:
         if self.corpus_path.exists():
-            with open(self.corpus_path, "r", encoding="utf-8") as f:
-                self.documents = json.load(f)
+            try:
+                with open(self.corpus_path, "r", encoding="utf-8") as f:
+                    self.documents = json.load(f)
+                logger.info("Loaded %d RAG passages from %s", len(self.documents), self.corpus_path)
+            except Exception as exc:
+                logger.warning("Failed to load RAG corpus %s: %s", self.corpus_path, exc)
+                self.documents = []
         else:
+            logger.warning("RAG corpus file not found at %s", self.corpus_path)
             self.documents = []
 
     def _tokenize(self, text: str) -> List[str]:

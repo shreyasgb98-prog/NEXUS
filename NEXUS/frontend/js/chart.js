@@ -58,8 +58,9 @@ class TelemetryChart {
     }
 
     resize() {
-        if (!this.canvas) return;
+        if (!this.canvas || !this.canvas.parentElement) return;
         const rect = this.canvas.parentElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
         const dpr = window.devicePixelRatio || 1;
         this.canvas.width = rect.width * dpr;
         this.canvas.height = rect.height * dpr;
@@ -118,9 +119,10 @@ class TelemetryChart {
 
     render() {
         const { ctx, canvas } = this;
-        if (!canvas) return;
+        if (!canvas || !ctx) return;
         const width = parseFloat(canvas.style.width) || canvas.width;
         const height = parseFloat(canvas.style.height) || canvas.height;
+        if (width <= 0 || height <= 0) return;
 
         // Dark phosphor CRT background
         ctx.fillStyle = '#0d0d0f';
@@ -140,6 +142,7 @@ class TelemetryChart {
         const bottomPad = 22;
         const plotWidth = width - leftPad - rightPad;
         const totalPlotHeight = height - topPad - bottomPad;
+        if (plotWidth <= 0 || totalPlotHeight <= 0) return;
         const trackHeight = totalPlotHeight / this.tracks.length;
 
         const step = plotWidth / (this.maxPoints - 1);

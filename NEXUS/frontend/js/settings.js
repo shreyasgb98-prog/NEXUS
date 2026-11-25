@@ -233,16 +233,16 @@ class SettingsManager {
                 const errStr = data.error || 'Connection refused';
                 if (statusText) {
                     statusText.style.color = '#ef4444';
-                    statusText.textContent = `OFFLINE: ${errStr}`;
+                    statusText.textContent = `AI Offline (Rule-Based Fallback Active): ${errStr}`;
                 }
                 if (btn) {
-                    btn.textContent = 'OFFLINE / FAILED';
+                    btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
                     btn.style.color = '#ef4444';
                     btn.style.borderColor = '#ef4444';
                 }
                 const app = window.nexusApp;
                 if (app && app.wazuhConsole) {
-                    app.wazuhConsole.showToast('ENDPOINT OFFLINE', `Ollama Offline: ${errStr}`, 'danger');
+                    app.wazuhConsole.showToast('AI OFFLINE', `AI Offline (Rule-Based Fallback Active): ${errStr}`, 'danger');
                 }
             }
         } catch (err) {
@@ -250,10 +250,10 @@ class SettingsManager {
             if (statusContainer) statusContainer.style.display = 'block';
             if (statusText) {
                 statusText.style.color = '#ef4444';
-                statusText.textContent = `OFFLINE: ${errStr}`;
+                statusText.textContent = `AI Offline (Rule-Based Fallback Active): ${errStr}`;
             }
             if (btn) {
-                btn.textContent = 'OFFLINE / FAILED';
+                btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
                 btn.style.color = '#ef4444';
                 btn.style.borderColor = '#ef4444';
             }

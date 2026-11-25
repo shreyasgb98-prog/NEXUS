@@ -27,7 +27,7 @@ class FeatureBaseline:
     def get_std_dev(self) -> float:
         # Prevent division by zero and enforce noise floor on discrete counts
         raw_sd = math.sqrt(max(self.variance, 0.0))
-        return max(raw_sd, self.std_dev_floor)
+        return max(raw_sd, self.std_dev_floor, 1e-6)
 
     def get_effective_mean(self, hour: Optional[int] = None) -> float:
         """Returns the expected mean, incorporating diurnal seasonal bucket if present."""
@@ -229,7 +229,7 @@ class AdaptiveBaselineEngine:
             flags[feat_name] = flagged
 
             # Suspend baseline updates during anomalous intervals to avoid poisoning
-            if not flagged:
+            if not flagged and (not self.is_warmed_up or abs(z) < self.z_threshold):
                 baseline.update(obs_val, hour=resolved_hour)
 
         return {

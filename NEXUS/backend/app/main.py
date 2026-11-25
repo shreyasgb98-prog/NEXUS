@@ -2,13 +2,15 @@ import os
 import io
 import csv
 import json
+import logging
 import time
 import struct
 import asyncio
 import httpx
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response, UploadFile, File, Header, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Response, UploadFile, File, Header, Depends
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,11 +18,14 @@ from pydantic import BaseModel
 from .config import (
     BASE_DIR,
     DB_PATH,
+    FRONTEND_DIR,
     WARMUP_WINDOWS,
     FIXED_DEAUTH_THRESHOLD,
     EWMA_ALPHA,
     Z_SCORE_THRESHOLD
 )
+
+logger = logging.getLogger("nexus.api")
 from .database import (
     apply_migrations,
     get_connection,
@@ -85,7 +90,24 @@ def verify_api_key(x_nexus_key: Optional[str] = Header(default="nexus-local-dev-
     if resolved_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized write operation")
 
-app = FastAPI(title="NEXUS AI Telemetry Service", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    try:
+        if assistant_engine is not None:
+            asyncio.create_task(assistant_engine.is_ollama_reachable(assistant_engine.ollama_url))
+    except Exception as exc:
+        logger.warning("Ollama pre-warm check failed during startup: %s", exc)
+    yield
+
+app = FastAPI(title="NEXUS AI Telemetry Service", version="1.0.0", lifespan=lifespan)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_server_error", "detail": str(exc)},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,30 +122,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-apply_migrations()
+try:
+    apply_migrations()
+except Exception as exc:
+    logger.warning("Database migration failed at startup: %s", exc)
 
 baseline_engine = AdaptiveBaselineEngine()
 correlation_engine = CorrelationEngine()
 evidence_builder = EvidenceBuilder()
 incident_manager = IncidentManager()
-assistant_engine = AskNexusAssistant()
+try:
+    assistant_engine = AskNexusAssistant()
+except Exception as exc:
+    logger.warning("Assistant/RAG initialization failed at startup: %s", exc)
+    assistant_engine = None
 replay_engine = CSVReplayEngine()
 
 # Initialize trusted AP allowlist cache in correlation engine
+_init_conn = None
 try:
     _init_conn = get_connection()
     correlation_engine.set_trusted_aps(get_trusted_aps_map(_init_conn))
-    _init_conn.close()
-except Exception:
-    pass
+except Exception as exc:
+    logger.warning("Trusted AP allowlist initialization failed: %s", exc)
+finally:
+    if _init_conn is not None:
+        _init_conn.close()
 
-@app.on_event("startup")
-async def startup_event():
+@app.get("/api/health")
+def get_health():
+    db_ok = False
+    conn = None
     try:
-        # Pre-warm Ollama cache so the first query has zero probe latency
-        asyncio.create_task(assistant_engine.is_ollama_reachable(assistant_engine.ollama_url))
+        conn = get_connection(db_mode="live")
+        conn.execute("SELECT 1;").fetchone()
+        db_ok = True
+    except Exception as exc:
+        logger.warning("Health check DB probe failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    rag_docs = 0
+    try:
+        if assistant_engine is not None and getattr(assistant_engine, "rag", None) is not None:
+            rag_docs = len(assistant_engine.rag.documents)
     except Exception:
-        pass
+        rag_docs = 0
+
+    ai_status = (
+        "online"
+        if assistant_engine is not None and getattr(assistant_engine, "_ollama_reachable_cached", None) is True
+        else "offline"
+    )
+    return {
+        "backend": "ok",
+        "db": "ok" if db_ok else "error",
+        "ai": ai_status,
+        "rag_docs": rag_docs,
+    }
 
 connected_clients: List[WebSocket] = []
 active_attack_labelling: bool = False
@@ -297,155 +354,157 @@ def process_telemetry_window(payload_dict: Dict[str, Any], data_source: str = "l
 
     metrics = evaluated["metrics"]
     conn = get_connection(db_mode=resolve_db_mode(data_source=source))
-
-    # Normalizing telemetry values from raw payload
-    deauth_cnt = int(payload_dict.get("deauth", 0))
-    mgmt_cnt = int(payload_dict.get("mgmt", 0))
-    ble_cnt = int(payload_dict.get("ble", 0))
-    rogue_cnt = int(payload_dict.get("rogue", 0))
-    rssi_mean_val = float(payload_dict.get("rssi_avg", payload_dict.get("rssi", -70.0)) or -70.0)
-    rssi_min_val = float(payload_dict.get("rssi_min", -90.0) or -90.0)
-    rssi_max_val = float(payload_dict.get("rssi_max", -30.0) or -30.0)
-    channel_val = int(payload_dict.get("ch", payload_dict.get("channel", 1)) or 1)
-    bssid_cnt_val = int(payload_dict.get("bssid_cnt", payload_dict.get("unique_bssids", 0)) or 0)
-
-    # Forensic attribution and proximity categorization
-    atk_src = str(payload_dict.get("atk_src") or payload_dict.get("attacker_mac") or "").strip().upper()
-    atk_dst = str(payload_dict.get("atk_dst") or payload_dict.get("target_mac") or "").strip().upper()
     try:
-        raw_atk_rssi = payload_dict.get("atk_rssi") if payload_dict.get("atk_rssi") is not None else payload_dict.get("attacker_rssi", 0)
-        atk_rssi = int(raw_atk_rssi) if raw_atk_rssi is not None else 0
-    except (ValueError, TypeError):
-        atk_rssi = 0
-    try:
-        raw_atk_reason = payload_dict.get("atk_reason") if payload_dict.get("atk_reason") is not None else payload_dict.get("deauth_reason", 0)
-        atk_reason = int(raw_atk_reason) if raw_atk_reason is not None else 0
-    except (ValueError, TypeError):
-        atk_reason = 0
 
-    proximity_zone = str(payload_dict.get("proximity_zone") or categorize_rssi_proximity(atk_rssi))
-    try:
-        raw_inj_cnt = payload_dict.get("inj") if payload_dict.get("inj") is not None else payload_dict.get("raw_injection_count", 0)
-        inj_cnt = int(raw_inj_cnt) if raw_inj_cnt is not None else 0
-    except (ValueError, TypeError):
-        inj_cnt = 0
+        # Normalizing telemetry values from raw payload
+        deauth_cnt = int(payload_dict.get("deauth", 0))
+        mgmt_cnt = int(payload_dict.get("mgmt", 0))
+        ble_cnt = int(payload_dict.get("ble", 0))
+        rogue_cnt = int(payload_dict.get("rogue", 0))
+        rssi_mean_val = float(payload_dict.get("rssi_avg", payload_dict.get("rssi", -70.0)) or -70.0)
+        rssi_min_val = float(payload_dict.get("rssi_min", -90.0) or -90.0)
+        rssi_max_val = float(payload_dict.get("rssi_max", -30.0) or -30.0)
+        channel_val = int(payload_dict.get("ch", payload_dict.get("channel", 1)) or 1)
+        bssid_cnt_val = int(payload_dict.get("bssid_cnt", payload_dict.get("unique_bssids", 0)) or 0)
 
-    top_raw = payload_dict.get("top")
-    if top_raw is not None and isinstance(top_raw, list):
-        top_json = json.dumps(top_raw)
-    elif payload_dict.get("top_sources_json"):
-        top_json = str(payload_dict["top_sources_json"])
-    else:
-        top_json = "[]"
+        # Forensic attribution and proximity categorization
+        atk_src = str(payload_dict.get("atk_src") or payload_dict.get("attacker_mac") or "").strip().upper()
+        atk_dst = str(payload_dict.get("atk_dst") or payload_dict.get("target_mac") or "").strip().upper()
+        try:
+            raw_atk_rssi = payload_dict.get("atk_rssi") if payload_dict.get("atk_rssi") is not None else payload_dict.get("attacker_rssi", 0)
+            atk_rssi = int(raw_atk_rssi) if raw_atk_rssi is not None else 0
+        except (ValueError, TypeError):
+            atk_rssi = 0
+        try:
+            raw_atk_reason = payload_dict.get("atk_reason") if payload_dict.get("atk_reason") is not None else payload_dict.get("deauth_reason", 0)
+            atk_reason = int(raw_atk_reason) if raw_atk_reason is not None else 0
+        except (ValueError, TypeError):
+            atk_reason = 0
 
-    insert_telemetry_window(
-        conn,
-        window_id=window_id,
-        epoch_ms=now_ms,
-        deauth_count=deauth_cnt,
-        mgmt_count=mgmt_cnt,
-        ble_count=ble_cnt,
-        rogue_count=rogue_cnt,
-        nfc_count=nfc_in_window,
-        rssi_mean=rssi_mean_val,
-        data_source=source,
-        is_attack_labelled=is_attack_labelled,
-        flag_fixed=flag_fixed,
-        flag_adaptive=flag_adaptive,
-        flag_nexus=flag_nexus,
-        ewma_deauth_mean=baseline_engine.baselines["deauth"].mean,
-        ewma_deauth_var=baseline_engine.baselines["deauth"].variance,
-        ewma_mgmt_mean=baseline_engine.baselines["mgmt"].mean,
-        ewma_mgmt_var=baseline_engine.baselines["mgmt"].variance,
-        ewma_ble_mean=baseline_engine.baselines["ble"].mean,
-        ewma_ble_var=baseline_engine.baselines["ble"].variance,
-        ewma_rogue_mean=baseline_engine.baselines["rogue"].mean,
-        ewma_rogue_var=baseline_engine.baselines["rogue"].variance,
-        z_deauth=metrics["deauth"]["z_score"],
-        z_mgmt=metrics["mgmt"]["z_score"],
-        z_ble=metrics["ble"]["z_score"],
-        z_rogue=metrics["rogue"]["z_score"],
-        unique_bssids=bssid_cnt_val,
-        top_sources_json=top_json,
-        channel=channel_val,
-        rssi_min=rssi_min_val,
-        rssi_max=rssi_max_val,
-        attacker_mac=atk_src,
-        target_mac=atk_dst,
-        attacker_rssi=atk_rssi,
-        deauth_reason=atk_reason,
-        proximity_zone=proximity_zone,
-        raw_injection_count=inj_cnt
-    )
+        proximity_zone = str(payload_dict.get("proximity_zone") or categorize_rssi_proximity(atk_rssi))
+        try:
+            raw_inj_cnt = payload_dict.get("inj") if payload_dict.get("inj") is not None else payload_dict.get("raw_injection_count", 0)
+            inj_cnt = int(raw_inj_cnt) if raw_inj_cnt is not None else 0
+        except (ValueError, TypeError):
+            inj_cnt = 0
 
-    save_baseline_state(
-        conn,
-        alpha=EWMA_ALPHA,
-        z_threshold=Z_SCORE_THRESHOLD,
-        warmup_windows=WARMUP_WINDOWS,
-        processed_windows=baseline_engine.processed_windows,
-        updated_epoch_ms=now_ms
-    )
-    for feat_name, b_obj in baseline_engine.baselines.items():
-        save_baseline_metric(
+        top_raw = payload_dict.get("top")
+        if top_raw is not None and isinstance(top_raw, list):
+            top_json = json.dumps(top_raw)
+        elif payload_dict.get("top_sources_json"):
+            top_json = str(payload_dict["top_sources_json"])
+        else:
+            top_json = "[]"
+
+        insert_telemetry_window(
             conn,
-            feature_name=feat_name,
-            mean=b_obj.mean,
-            variance=b_obj.variance,
-            std_dev=b_obj.get_std_dev(),
-            updated_epoch_ms=now_ms
-        )
-
-    new_alert_record = None
-    if correlated_event:
-        explanation = f"{correlated_event['event_type']} detected via multi-signal statistical correlation"
-        new_alert_record = evidence_builder.build_record(
-            window_id=window_id,
-            event_type=correlated_event["event_type"],
-            type_key=correlated_event["type_key"],
-            severity=correlated_event["severity"],
-            confidence=correlated_event["confidence"],
-            evidence_dict=correlated_event["evidence"],
-            explanation_text=explanation,
-            data_source=source
-        )
-
-        tool_sig = map_reason_code_to_signature(atk_reason) if atk_reason else "UNKNOWN"
-        new_alert_record["attacker_mac"] = atk_src
-        new_alert_record["target_mac"] = atk_dst
-        new_alert_record["attacker_rssi"] = atk_rssi
-        new_alert_record["deauth_reason"] = atk_reason
-        new_alert_record["tool_signature"] = tool_sig
-        new_alert_record["proximity_zone"] = proximity_zone
-        if isinstance(new_alert_record.get("evidence"), dict):
-            new_alert_record["evidence"]["attacker_mac"] = atk_src
-            new_alert_record["evidence"]["target_mac"] = atk_dst
-            new_alert_record["evidence"]["attacker_rssi"] = atk_rssi
-            new_alert_record["evidence"]["deauth_reason"] = atk_reason
-            new_alert_record["evidence"]["tool_signature"] = tool_sig
-            new_alert_record["evidence"]["proximity_zone"] = proximity_zone
-
-        insert_alert_event(
-            conn,
-            event_id=new_alert_record["id"],
             window_id=window_id,
             epoch_ms=now_ms,
-            type_key=new_alert_record["type_key"],
-            event_type=new_alert_record["type"],
-            severity=new_alert_record["severity"],
-            confidence=new_alert_record["confidence"],
-            signals_correlated=correlated_event["signals_correlated"],
+            deauth_count=deauth_cnt,
+            mgmt_count=mgmt_cnt,
+            ble_count=ble_cnt,
+            rogue_count=rogue_cnt,
+            nfc_count=nfc_in_window,
+            rssi_mean=rssi_mean_val,
             data_source=source,
-            evidence_json=json.dumps(new_alert_record["evidence"]),
-            explanation=explanation
+            is_attack_labelled=is_attack_labelled,
+            flag_fixed=flag_fixed,
+            flag_adaptive=flag_adaptive,
+            flag_nexus=flag_nexus,
+            ewma_deauth_mean=baseline_engine.baselines["deauth"].mean,
+            ewma_deauth_var=baseline_engine.baselines["deauth"].variance,
+            ewma_mgmt_mean=baseline_engine.baselines["mgmt"].mean,
+            ewma_mgmt_var=baseline_engine.baselines["mgmt"].variance,
+            ewma_ble_mean=baseline_engine.baselines["ble"].mean,
+            ewma_ble_var=baseline_engine.baselines["ble"].variance,
+            ewma_rogue_mean=baseline_engine.baselines["rogue"].mean,
+            ewma_rogue_var=baseline_engine.baselines["rogue"].variance,
+            z_deauth=metrics["deauth"]["z_score"],
+            z_mgmt=metrics["mgmt"]["z_score"],
+            z_ble=metrics["ble"]["z_score"],
+            z_rogue=metrics["rogue"]["z_score"],
+            unique_bssids=bssid_cnt_val,
+            top_sources_json=top_json,
+            channel=channel_val,
+            rssi_min=rssi_min_val,
+            rssi_max=rssi_max_val,
+            attacker_mac=atk_src,
+            target_mac=atk_dst,
+            attacker_rssi=atk_rssi,
+            deauth_reason=atk_reason,
+            proximity_zone=proximity_zone,
+            raw_injection_count=inj_cnt
         )
 
-        incident_info = incident_manager.ingest_alert(new_alert_record, conn=conn)
-        new_alert_record["incident_id"] = incident_info.get("incident_id")
-    else:
-        incident_info = None
+        save_baseline_state(
+            conn,
+            alpha=EWMA_ALPHA,
+            z_threshold=Z_SCORE_THRESHOLD,
+            warmup_windows=WARMUP_WINDOWS,
+            processed_windows=baseline_engine.processed_windows,
+            updated_epoch_ms=now_ms
+        )
+        for feat_name, b_obj in baseline_engine.baselines.items():
+            save_baseline_metric(
+                conn,
+                feature_name=feat_name,
+                mean=b_obj.mean,
+                variance=b_obj.variance,
+                std_dev=b_obj.get_std_dev(),
+                updated_epoch_ms=now_ms
+            )
 
-    conn.close()
+        new_alert_record = None
+        if correlated_event:
+            explanation = f"{correlated_event['event_type']} detected via multi-signal statistical correlation"
+            new_alert_record = evidence_builder.build_record(
+                window_id=window_id,
+                event_type=correlated_event["event_type"],
+                type_key=correlated_event["type_key"],
+                severity=correlated_event["severity"],
+                confidence=correlated_event["confidence"],
+                evidence_dict=correlated_event["evidence"],
+                explanation_text=explanation,
+                data_source=source
+            )
+
+            tool_sig = map_reason_code_to_signature(atk_reason) if atk_reason else "UNKNOWN"
+            new_alert_record["attacker_mac"] = atk_src
+            new_alert_record["target_mac"] = atk_dst
+            new_alert_record["attacker_rssi"] = atk_rssi
+            new_alert_record["deauth_reason"] = atk_reason
+            new_alert_record["tool_signature"] = tool_sig
+            new_alert_record["proximity_zone"] = proximity_zone
+            if isinstance(new_alert_record.get("evidence"), dict):
+                new_alert_record["evidence"]["attacker_mac"] = atk_src
+                new_alert_record["evidence"]["target_mac"] = atk_dst
+                new_alert_record["evidence"]["attacker_rssi"] = atk_rssi
+                new_alert_record["evidence"]["deauth_reason"] = atk_reason
+                new_alert_record["evidence"]["tool_signature"] = tool_sig
+                new_alert_record["evidence"]["proximity_zone"] = proximity_zone
+
+            insert_alert_event(
+                conn,
+                event_id=new_alert_record["id"],
+                window_id=window_id,
+                epoch_ms=now_ms,
+                type_key=new_alert_record["type_key"],
+                event_type=new_alert_record["type"],
+                severity=new_alert_record["severity"],
+                confidence=new_alert_record["confidence"],
+                signals_correlated=correlated_event["signals_correlated"],
+                data_source=source,
+                evidence_json=json.dumps(new_alert_record["evidence"]),
+                explanation=explanation
+            )
+
+            incident_info = incident_manager.ingest_alert(new_alert_record, conn=conn)
+            new_alert_record["incident_id"] = incident_info.get("incident_id")
+        else:
+            incident_info = None
+
+    finally:
+        conn.close()
 
     result_package = {
         "window_id": window_id,
@@ -503,8 +562,10 @@ async def websocket_telemetry_stream(websocket: WebSocket):
 @app.get("/api/status")
 def get_system_status():
     conn = get_connection()
-    err_count = fetch_serial_error_count(conn)
-    conn.close()
+    try:
+        err_count = fetch_serial_error_count(conn)
+    finally:
+        conn.close()
 
     current_state = serial_manager.state
     if current_state == "ACTIVE_MONITORING" and not baseline_engine.is_warmed_up:
@@ -528,20 +589,24 @@ def ingest_telemetry_window(payload: WindowIngestPayload):
 @app.post("/api/telemetry/label")
 def label_telemetry_window(payload: LabelWindowPayload):
     conn = get_connection()
-    rows_updated = update_window_attack_label(conn, payload.window_id, payload.is_attack_labelled)
-    conn.close()
+    try:
+        rows_updated = update_window_attack_label(conn, payload.window_id, payload.is_attack_labelled)
+    finally:
+        conn.close()
     return {"window_id": payload.window_id, "is_attack_labelled": payload.is_attack_labelled, "updated": rows_updated}
 
 @app.post("/api/telemetry/label-range")
 def label_telemetry_range(payload: LabelRangePayload):
     conn = get_connection()
-    rows_updated = update_window_range_attack_label(
-        conn,
-        payload.start_window_id,
-        payload.end_window_id,
-        payload.is_attack_labelled
-    )
-    conn.close()
+    try:
+        rows_updated = update_window_range_attack_label(
+            conn,
+            payload.start_window_id,
+            payload.end_window_id,
+            payload.is_attack_labelled
+        )
+    finally:
+        conn.close()
     return {
         "start_window_id": payload.start_window_id,
         "end_window_id": payload.end_window_id,
@@ -562,8 +627,10 @@ def get_label_mode():
 @app.get("/api/metrics/comparison")
 def get_detector_comparison(data_source: Optional[str] = None):
     conn = get_connection()
-    windows = fetch_windows_for_metrics(conn, warmup_windows=WARMUP_WINDOWS, data_source=data_source)
-    conn.close()
+    try:
+        windows = fetch_windows_for_metrics(conn, warmup_windows=WARMUP_WINDOWS, data_source=data_source)
+    finally:
+        conn.close()
     return compute_detector_metrics(
         windows,
         warmup_windows=WARMUP_WINDOWS,
@@ -573,8 +640,10 @@ def get_detector_comparison(data_source: Optional[str] = None):
 @app.get("/api/telemetry/rolling")
 def get_telemetry_rolling(start_epoch_ms: int, end_epoch_ms: int, data_source: Optional[str] = None):
     conn = get_connection()
-    rows = fetch_telemetry_rolling_window(conn, start_epoch_ms, end_epoch_ms, data_source)
-    conn.close()
+    try:
+        rows = fetch_telemetry_rolling_window(conn, start_epoch_ms, end_epoch_ms, data_source)
+    finally:
+        conn.close()
     return rows
 
 @app.get("/api/telemetry/recent")
@@ -623,23 +692,29 @@ def get_alerts_rolling(
     event_type: Optional[str] = None
 ):
     conn = get_connection()
-    rows = fetch_alerts_rolling_window(conn, start_epoch_ms, end_epoch_ms, data_source, event_type)
-    conn.close()
+    try:
+        rows = fetch_alerts_rolling_window(conn, start_epoch_ms, end_epoch_ms, data_source, event_type)
+    finally:
+        conn.close()
     return rows
 
 @app.get("/api/baseline")
 def get_baseline_info():
     conn = get_connection()
-    state = fetch_baseline_state(conn)
-    metrics = fetch_baseline_metrics(conn)
-    conn.close()
+    try:
+        state = fetch_baseline_state(conn)
+        metrics = fetch_baseline_metrics(conn)
+    finally:
+        conn.close()
     return {"state": state, "metrics": metrics}
 
 @app.get("/api/database/status")
 def get_database_status():
     conn = get_connection()
-    res = fetch_database_status(conn)
-    conn.close()
+    try:
+        res = fetch_database_status(conn)
+    finally:
+        conn.close()
     return res
 
 @app.post("/api/settings")
@@ -664,15 +739,17 @@ def update_settings(payload: SettingsPayload):
     )
 
     conn = get_connection()
-    save_baseline_state(
-        conn=conn,
-        alpha=current["alpha"],
-        z_threshold=current["z_threshold"],
-        warmup_windows=current["warmup_windows"],
-        processed_windows=baseline_engine.processed_windows,
-        updated_epoch_ms=int(time.time() * 1000)
-    )
-    conn.close()
+    try:
+        save_baseline_state(
+            conn=conn,
+            alpha=current["alpha"],
+            z_threshold=current["z_threshold"],
+            warmup_windows=current["warmup_windows"],
+            processed_windows=baseline_engine.processed_windows,
+            updated_epoch_ms=int(time.time() * 1000)
+        )
+    finally:
+        conn.close()
 
     return {
         "status": "applied",
@@ -737,8 +814,10 @@ def set_adaptive_scan_plan_override(payload: ScanPlanOverridePayload):
 @app.get("/api/errors/counters")
 def get_error_counters():
     conn = get_connection()
-    counters = fetch_serial_error_counters(conn)
-    conn.close()
+    try:
+        counters = fetch_serial_error_counters(conn)
+    finally:
+        conn.close()
     return counters
 
 @app.post("/api/serial/connect", dependencies=[Depends(verify_api_key)])
@@ -756,8 +835,10 @@ def disconnect_serial_port():
 @app.post("/api/hardware/whitelist")
 def add_hardware_whitelist(payload: HardwareWhitelistPayload):
     conn = get_connection()
-    insert_hardware_whitelist(conn, payload.bssid or "", payload.ssid or "", payload.channel or 0)
-    conn.close()
+    try:
+        insert_hardware_whitelist(conn, payload.bssid or "", payload.ssid or "", payload.channel or 0)
+    finally:
+        conn.close()
 
     cmd_dict = {
         "cmd": "wl_add",
@@ -776,8 +857,10 @@ def add_hardware_whitelist(payload: HardwareWhitelistPayload):
 @app.delete("/api/hardware/whitelist/{bssid}")
 def delete_hardware_whitelist_by_path(bssid: str):
     conn = get_connection()
-    deleted = delete_hardware_whitelist(conn, bssid)
-    conn.close()
+    try:
+        deleted = delete_hardware_whitelist(conn, bssid)
+    finally:
+        conn.close()
 
     cmd_dict = {"cmd": "wl_del", "bssid": bssid}
     dispatched = False
@@ -795,8 +878,10 @@ def delete_hardware_whitelist_by_path(bssid: str):
 def clear_hardware_whitelist(payload: Optional[HardwareWhitelistPayload] = None):
     bssid_to_del = payload.bssid if (payload and payload.bssid) else None
     conn = get_connection()
-    deleted_count = delete_hardware_whitelist(conn, bssid_to_del)
-    conn.close()
+    try:
+        deleted_count = delete_hardware_whitelist(conn, bssid_to_del)
+    finally:
+        conn.close()
 
     if bssid_to_del:
         cmd_dict = {"cmd": "wl_del", "bssid": bssid_to_del}
@@ -815,8 +900,10 @@ def clear_hardware_whitelist(payload: Optional[HardwareWhitelistPayload] = None)
 @app.get("/api/hardware/whitelist")
 def get_hardware_whitelist():
     conn = get_connection()
-    entries = fetch_all_hardware_whitelist(conn)
-    conn.close()
+    try:
+        entries = fetch_all_hardware_whitelist(conn)
+    finally:
+        conn.close()
     return entries
 
 @app.post("/api/telemetry/reset", dependencies=[Depends(verify_api_key)])
@@ -839,23 +926,29 @@ def reset_telemetry_state():
     active_attack_labelling = False
 
     conn = get_connection()
-    reset_telemetry_database(conn)
-    conn.close()
+    try:
+        reset_telemetry_database(conn)
+    finally:
+        conn.close()
 
     return {"status": "database_reset_ok"}
 
 @app.get("/api/telemetry/history")
 def get_telemetry_history(limit: int = 100):
     conn = get_connection()
-    rows = fetch_recent_telemetry(conn, limit=limit)
-    conn.close()
+    try:
+        rows = fetch_recent_telemetry(conn, limit=limit)
+    finally:
+        conn.close()
     return rows
 
 @app.get("/api/alerts")
 def get_alerts_history(limit: int = 50):
     conn = get_connection()
-    rows = fetch_recent_alerts(conn, limit=limit)
-    conn.close()
+    try:
+        rows = fetch_recent_alerts(conn, limit=limit)
+    finally:
+        conn.close()
     return rows
 
 @app.get("/api/logs/query")
@@ -867,15 +960,17 @@ def query_logs(
     limit: int = 50
 ):
     conn = get_connection()
-    results = query_alert_logs(
-        conn,
-        q=q,
-        data_source=data_source,
-        severity=severity,
-        window_id=window_id,
-        limit=limit
-    )
-    conn.close()
+    try:
+        results = query_alert_logs(
+            conn,
+            q=q,
+            data_source=data_source,
+            severity=severity,
+            window_id=window_id,
+            limit=limit
+        )
+    finally:
+        conn.close()
     return results
 
 @app.get("/api/export/events")
@@ -886,8 +981,10 @@ def export_events(
     end_epoch_ms: Optional[int] = None
 ):
     conn = get_connection()
-    events = fetch_all_alerts(conn, data_source=data_source)
-    conn.close()
+    try:
+        events = fetch_all_alerts(conn, data_source=data_source)
+    finally:
+        conn.close()
     if start_epoch_ms is not None:
         events = [e for e in events if (e.get("epoch_ms") or 0) >= start_epoch_ms]
     if end_epoch_ms is not None:
@@ -937,8 +1034,10 @@ def export_telemetry(
     end_epoch_ms: Optional[int] = None
 ):
     conn = get_connection()
-    windows = fetch_all_telemetry(conn, data_source=data_source)
-    conn.close()
+    try:
+        windows = fetch_all_telemetry(conn, data_source=data_source)
+    finally:
+        conn.close()
     if start_epoch_ms is not None:
         windows = [w for w in windows if (w.get("epoch_ms") or 0) >= start_epoch_ms]
     if end_epoch_ms is not None:
@@ -990,38 +1089,44 @@ def export_telemetry(
 @app.post("/api/trusted-aps/learn")
 def learn_trusted_aps(payload: Optional[LearnTrustedApsPayload] = None):
     conn = get_connection()
-    count = 0
-    if payload and payload.aps:
-        count = bulk_learn_trusted_aps(payload.aps, conn=conn)
-    else:
-        limit_w = payload.limit_windows if payload else 200
-        count = learn_trusted_aps_from_telemetry(conn=conn, limit_windows=limit_w or 200)
+    try:
+        count = 0
+        if payload and payload.aps:
+            count = bulk_learn_trusted_aps(payload.aps, conn=conn)
+        else:
+            limit_w = payload.limit_windows if payload else 200
+            count = learn_trusted_aps_from_telemetry(conn=conn, limit_windows=limit_w or 200)
 
-    correlation_engine.set_trusted_aps(get_trusted_aps_map(conn))
-    conn.close()
+        correlation_engine.set_trusted_aps(get_trusted_aps_map(conn))
+    finally:
+        conn.close()
     return {"status": "learned", "learned_count": count}
 
 @app.get("/api/trusted-aps")
 def get_trusted_aps():
     conn = get_connection()
-    aps = fetch_trusted_aps(conn)
-    conn.close()
+    try:
+        aps = fetch_trusted_aps(conn)
+    finally:
+        conn.close()
     return aps
 
 @app.post("/api/trusted-aps")
 def add_or_update_trusted_ap(payload: TrustedApPayload):
     conn = get_connection()
-    now_ms = int(time.time() * 1000)
-    upsert_trusted_ap(
-        bssid=payload.bssid,
-        ssid=payload.ssid,
-        channel=payload.channel,
-        epoch_ms=now_ms,
-        is_active=payload.is_active,
-        conn=conn
-    )
-    correlation_engine.set_trusted_aps(get_trusted_aps_map(conn))
-    conn.close()
+    try:
+        now_ms = int(time.time() * 1000)
+        upsert_trusted_ap(
+            bssid=payload.bssid,
+            ssid=payload.ssid,
+            channel=payload.channel,
+            epoch_ms=now_ms,
+            is_active=payload.is_active,
+            conn=conn
+        )
+        correlation_engine.set_trusted_aps(get_trusted_aps_map(conn))
+    finally:
+        conn.close()
     return {"status": "upserted", "bssid": payload.bssid, "is_active": payload.is_active}
 
 @app.get("/api/incidents")
@@ -1040,14 +1145,16 @@ def get_incidents(mode: Optional[str] = "live"):
 @app.post("/api/incidents/{incident_id}/status")
 def change_incident_status(incident_id: str, payload: IncidentStatusPayload):
     conn = get_connection()
-    success = incident_manager.update_status(
-        incident_id=incident_id,
-        new_status=payload.status,
-        note=payload.note or "",
-        baseline_engine=baseline_engine,
-        conn=conn
-    )
-    conn.close()
+    try:
+        success = incident_manager.update_status(
+            incident_id=incident_id,
+            new_status=payload.status,
+            note=payload.note or "",
+            baseline_engine=baseline_engine,
+            conn=conn
+        )
+    finally:
+        conn.close()
     if not success:
         raise HTTPException(status_code=404, detail="Incident not found or update failed.")
     return {"incident_id": incident_id, "status": payload.status.upper(), "updated": True}
@@ -1055,10 +1162,12 @@ def change_incident_status(incident_id: str, payload: IncidentStatusPayload):
 @app.get("/api/incidents/{incident_id}")
 def get_incident_by_id_endpoint(incident_id: str):
     conn = get_connection()
-    inc = fetch_incident_by_id(incident_id, conn=conn)
-    if not inc:
-        inc = fetch_incident_with_timeline(incident_id, conn=conn)
-    conn.close()
+    try:
+        inc = fetch_incident_by_id(incident_id, conn=conn)
+        if not inc:
+            inc = fetch_incident_with_timeline(incident_id, conn=conn)
+    finally:
+        conn.close()
     if not inc:
         raise HTTPException(status_code=404, detail="Incident not found.")
     return inc
@@ -1066,8 +1175,10 @@ def get_incident_by_id_endpoint(incident_id: str):
 @app.post("/api/incidents/{incident_id}/remediation")
 def update_incident_remediation_endpoint(incident_id: str, payload: RemediationUpdatePayload):
     conn = get_connection()
-    success = update_incident_remediation(conn, incident_id, payload.completed_steps)
-    conn.close()
+    try:
+        success = update_incident_remediation(conn, incident_id, payload.completed_steps)
+    finally:
+        conn.close()
     if not success:
         raise HTTPException(status_code=404, detail="Incident not found or update failed.")
     return {
@@ -1159,8 +1270,10 @@ def generate_incidents_report(payload: Optional[GenerateReportPayload] = None, l
         target_limit = limit
 
     conn = get_connection()
-    incidents_data = fetch_incidents(conn, limit=target_limit)
-    conn.close()
+    try:
+        incidents_data = fetch_incidents(conn, limit=target_limit)
+    finally:
+        conn.close()
 
     # Collect baseline parameters from baseline_engine
     baseline_summary: Dict[str, Any] = {
@@ -1283,8 +1396,10 @@ def generate_incident_pcap(incident_dict: Dict[str, Any]) -> bytes:
 @app.get("/api/incidents/{incident_id}/pcap")
 def download_incident_pcap(incident_id: str):
     conn = get_connection()
-    inc = fetch_incident_with_timeline(incident_id, conn=conn)
-    conn.close()
+    try:
+        inc = fetch_incident_with_timeline(incident_id, conn=conn)
+    finally:
+        conn.close()
 
     if not inc or not inc.get("incident_id"):
         raise HTTPException(status_code=404, detail="Incident not found.")
@@ -1399,23 +1514,29 @@ def get_csv_replay_status():
 @app.get("/api/evaluation/threshold-sweep")
 def get_evaluation_threshold_sweep(data_source: Optional[str] = None):
     conn = get_connection()
-    windows = fetch_all_telemetry(conn, data_source=data_source)
-    conn.close()
+    try:
+        windows = fetch_all_telemetry(conn, data_source=data_source)
+    finally:
+        conn.close()
     return compute_threshold_sweep(windows, warmup_windows=WARMUP_WINDOWS)
 
 @app.get("/api/evaluation/ablation")
 def get_evaluation_ablation(data_source: Optional[str] = None):
     conn = get_connection()
-    windows = fetch_all_telemetry(conn, data_source=data_source)
-    conn.close()
+    try:
+        windows = fetch_all_telemetry(conn, data_source=data_source)
+    finally:
+        conn.close()
     return compute_ablation_analysis(windows, warmup_windows=WARMUP_WINDOWS)
 
 @app.post("/api/telemetry/prune", dependencies=[Depends(verify_api_key)])
 def prune_telemetry_endpoint(payload: Optional[PrunePayload] = None):
     hours = payload.retention_hours if payload else 48
     conn = get_connection()
-    res = prune_historical_telemetry(retention_hours=hours, conn=conn)
-    conn.close()
+    try:
+        res = prune_historical_telemetry(retention_hours=hours, conn=conn)
+    finally:
+        conn.close()
     return {
         "status": "pruned",
         "retention_hours": res["retention_hours"],
@@ -1424,6 +1545,5 @@ def prune_telemetry_endpoint(payload: Optional[PrunePayload] = None):
         "remaining_windows": res.get("remaining_windows", 0)
     }
 
-frontend_dir = BASE_DIR / "frontend"
-if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

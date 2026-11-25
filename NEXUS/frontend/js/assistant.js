@@ -188,7 +188,7 @@ class NexusAssistant {
                 this.bindCitationEvents(responseBody);
             } else {
                 // Client-side grounded operational fallback
-                const fallbackResponse = this.generateGroundedClientAnswer(query);
+                const fallbackResponse = `> **AI Offline (Rule-Based Fallback Active)**\n\n${this.generateGroundedClientAnswer(query)}`;
                 this.simulateStreamingFallback(responseBody, fallbackResponse);
             }
         } finally {
