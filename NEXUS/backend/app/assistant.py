@@ -577,12 +577,15 @@ class AskNexusAssistant:
         else:
             mitre_lines.append("| Incident ID | Event Type | MITRE Technique ID | Technique Name | Tactic |")
             mitre_lines.append("|---|---|---|---|---|")
+            from .incident_manager import map_incident_to_mitre
             for inc in incidents:
                 inc_id = inc.get("incident_id") or inc.get("id", "UNKNOWN")
                 ev_type = inc.get("event_type") or inc.get("primary_type", "ANOMALY")
-                m_id = inc.get("mitre_technique_id", "T1200")
-                m_name = inc.get("mitre_technique_name") or "Hardware Additions / Wireless Interception"
-                m_tactic = inc.get("mitre_tactic") or "Initial Access (TA0001)"
+                m_default = map_incident_to_mitre(ev_type)
+                raw_mid = inc.get("mitre_technique_id")
+                m_id = raw_mid if (raw_mid and (raw_mid != "T1200" or "HARDWARE" in str(ev_type).upper())) else m_default["technique_id"]
+                m_name = inc.get("mitre_technique_name") or m_default["technique_name"]
+                m_tactic = inc.get("mitre_tactic") or m_default["tactic"]
                 mitre_lines.append(f"| {inc_id} | {ev_type} | {m_id} | {m_name} | {m_tactic} |")
 
         # Section 4: Statistical Anomaly Verification (EWMA Mean/Variance Deviation)
@@ -617,12 +620,14 @@ class AskNexusAssistant:
         else:
             ledger_lines.append("| Incident ID | Event Type | Attacker MAC | Reason Code | MITRE Technique | SHA-256 Evidence Digest |")
             ledger_lines.append("|---|---|---|---|---|---|")
+            from .incident_manager import map_incident_to_mitre
             for inc in incidents:
                 inc_id = inc.get("incident_id") or inc.get("id", "UNKNOWN")
                 ev_type = inc.get("event_type") or inc.get("primary_type", "ANOMALY")
                 atk_mac = inc.get("attacker_mac") or "UNKNOWN"
                 code = inc.get("deauth_reason", 0)
-                m_id = inc.get("mitre_technique_id", "T1200")
+                raw_mid = inc.get("mitre_technique_id")
+                m_id = raw_mid if (raw_mid and (raw_mid != "T1200" or "HARDWARE" in str(ev_type).upper())) else map_incident_to_mitre(ev_type)["technique_id"]
                 h = inc.get("evidence_hash") or "N/A"
                 ledger_lines.append(f"| {inc_id} | {ev_type} | {atk_mac} | {code} | {m_id} | `{h}` |")
 

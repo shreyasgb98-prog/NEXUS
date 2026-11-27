@@ -45,8 +45,8 @@ class WebSerialReceiver {
     async connect(baudRate = 115200) {
         if (typeof navigator === 'undefined' || !('serial' in navigator)) {
             const app = window.nexusApp;
-            if (app && app.wazuhConsole) {
-                app.wazuhConsole.showToast('SERIAL ERROR', 'Web Serial API is not supported in this browser. Use Chromium-based Google Chrome or Microsoft Edge.', 'danger');
+            if (app && app.opsConsole) {
+                app.opsConsole.showToast('SERIAL ERROR', 'Web Serial API is not supported in this browser. Use Chromium-based Google Chrome or Microsoft Edge.', 'danger');
             } else if (app && typeof app.showWin32Dialog === 'function') {
                 app.showWin32Dialog('Web Serial API Unsupported', '<div style="font-size: 11px;">Web Serial API is not supported in this browser. Use Chromium-based Google Chrome or Microsoft Edge.</div>');
             }
@@ -219,6 +219,17 @@ class WebSerialReceiver {
                     // Targeted JSON.parse inside isolated try/catch block
                     try {
                         const payload = JSON.parse(trimmed);
+                        if (
+                            payload.sd_info ||
+                            payload.sd_chunk ||
+                            payload.sd_del ||
+                            (payload.type === 'ap_list' && Array.isArray(payload.aps)) ||
+                            payload.type === 'sd_sync_line' ||
+                            payload.type === 'sd_sync_done'
+                        ) {
+                            if (this.callbacks.onControl) this.callbacks.onControl(payload);
+                            continue;
+                        }
                         if (
                             typeof payload.deauth === 'undefined' ||
                             typeof payload.mgmt === 'undefined' ||

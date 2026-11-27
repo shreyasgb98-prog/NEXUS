@@ -38,7 +38,7 @@ class TelemetryTableManager {
                 if (c) c.style.display = 'none';
             });
             if (activeTab) activeTab.classList.add('active');
-            if (showContainer) showContainer.style.display = 'block';
+            if (showContainer) showContainer.style.display = 'flex';
         };
 
         if (tabTrustedAps) {

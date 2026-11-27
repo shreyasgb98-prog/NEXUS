@@ -412,6 +412,23 @@ def insert_telemetry(
         if close_on_exit and conn:
             conn.close()
 
+def _resolve_mitre_defaults(
+    event_type: str,
+    tech_id: Optional[str] = None,
+    tech_name: Optional[str] = None,
+    tactic: Optional[str] = None
+) -> tuple:
+    from .incident_manager import map_incident_to_mitre
+    default_mitre = map_incident_to_mitre(event_type or "")
+    raw_id = str(tech_id or "").strip()
+    if not raw_id or (raw_id == "T1200" and "HARDWARE" not in str(event_type or "").upper()):
+        resolved_id = default_mitre["technique_id"]
+    else:
+        resolved_id = raw_id
+    resolved_name = str(tech_name or "").strip() or default_mitre["technique_name"]
+    resolved_tactic = str(tactic or "").strip() or default_mitre["tactic"]
+    return resolved_id, resolved_name, resolved_tactic
+
 def insert_alert_event(
     alert_dict_or_conn: Any = None,
     *args,
@@ -445,9 +462,12 @@ def insert_alert_event(
             mitre_technique = str(kwargs.get("mitre_technique", ""))
             owasp_category = str(kwargs.get("owasp_category", ""))
             suggested_action = str(kwargs.get("suggested_action", ""))
-            mitre_technique_id = str(kwargs.get("mitre_technique_id") or kwargs.get("technique_id") or "T1200")
-            mitre_technique_name = str(kwargs.get("mitre_technique_name") or kwargs.get("technique_name") or "")
-            mitre_tactic = str(kwargs.get("mitre_tactic") or kwargs.get("tactic") or "")
+            mitre_technique_id, mitre_technique_name, mitre_tactic = _resolve_mitre_defaults(
+                event_type,
+                kwargs.get("mitre_technique_id") or kwargs.get("technique_id"),
+                kwargs.get("mitre_technique_name") or kwargs.get("technique_name"),
+                kwargs.get("mitre_tactic") or kwargs.get("tactic"),
+            )
             evidence_hash = str(kwargs.get("evidence_hash") or "")
             if not evidence_hash:
                 evidence_hash = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
@@ -468,9 +488,9 @@ def insert_alert_event(
             mitre_technique = ""
             owasp_category = ""
             suggested_action = ""
-            mitre_technique_id = "T1200"
-            mitre_technique_name = ""
-            mitre_tactic = ""
+            mitre_technique_id, mitre_technique_name, mitre_tactic = _resolve_mitre_defaults(
+                event_type, None, None, None
+            )
             evidence_hash = hashlib.sha256(b"{}").hexdigest()
             id_val = None
     elif isinstance(alert_dict_or_conn, dict):
@@ -500,9 +520,12 @@ def insert_alert_event(
         mitre_technique = str(alert_dict.get("mitre_technique", ""))
         owasp_category = str(alert_dict.get("owasp_category", ""))
         suggested_action = str(alert_dict.get("suggested_action", ""))
-        mitre_technique_id = str(alert_dict.get("mitre_technique_id") or alert_dict.get("technique_id") or kwargs.get("mitre_technique_id") or "T1200")
-        mitre_technique_name = str(alert_dict.get("mitre_technique_name") or alert_dict.get("technique_name") or kwargs.get("mitre_technique_name") or "")
-        mitre_tactic = str(alert_dict.get("mitre_tactic") or alert_dict.get("tactic") or kwargs.get("mitre_tactic") or "")
+        mitre_technique_id, mitre_technique_name, mitre_tactic = _resolve_mitre_defaults(
+            event_type,
+            alert_dict.get("mitre_technique_id") or alert_dict.get("technique_id") or kwargs.get("mitre_technique_id"),
+            alert_dict.get("mitre_technique_name") or alert_dict.get("technique_name") or kwargs.get("mitre_technique_name"),
+            alert_dict.get("mitre_tactic") or alert_dict.get("tactic") or kwargs.get("mitre_tactic"),
+        )
         evidence_hash = str(alert_dict.get("evidence_hash") or kwargs.get("evidence_hash") or "")
         if not evidence_hash:
             evidence_hash = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
@@ -1334,18 +1357,44 @@ def insert_incident(
             or incident_dict.get("incident_id")
             or f"INC-{time.strftime('%Y%m%d', time.gmtime(now_ms / 1000))}-{now_ms % 100000:05d}"
         )
-        start_window = int(incident_dict.get("start_window", incident_dict.get("window_id", 0)))
+        evidence_raw = incident_dict.get("evidence")
+        evidence_dict: Dict[str, Any] = {}
+        if isinstance(evidence_raw, dict):
+            evidence_dict = dict(evidence_raw)
+        elif isinstance(evidence_raw, str) and evidence_raw.strip():
+            try:
+                parsed_ev = json.loads(evidence_raw)
+                if isinstance(parsed_ev, dict):
+                    evidence_dict = parsed_ev
+            except Exception:
+                pass
+
+        start_window = int(
+            incident_dict.get("start_window")
+            or incident_dict.get("window_id")
+            or evidence_dict.get("window_id")
+            or 0
+        )
         last_window = int(incident_dict.get("last_window", start_window))
         start_epoch_ms = int(incident_dict.get("start_epoch_ms", now_ms))
         last_epoch_ms = int(incident_dict.get("last_epoch_ms", incident_dict.get("end_epoch_ms", start_epoch_ms)))
         title = str(incident_dict.get("title") or incident_dict.get("summary") or "Wireless Security Incident")
         primary_type = str(incident_dict.get("primary_type") or incident_dict.get("event_type") or "ANOMALY")
         severity = str(incident_dict.get("severity", "MEDIUM")).upper()
-        confidence = float(incident_dict.get("confidence", 0.9))
+        raw_conf = incident_dict.get("confidence")
+        confidence = float(raw_conf if raw_conf is not None else 0.9)
         status = str(incident_dict.get("status", "OPEN")).upper()
         event_count = int(incident_dict.get("event_count", 1))
 
-        signals = incident_dict.get("signals_involved_json", incident_dict.get("associated_event_ids_json", "[]"))
+        if incident_dict.get("channel") is not None and "channel" not in evidence_dict:
+            evidence_dict["channel"] = incident_dict.get("channel")
+
+        signals = incident_dict.get("signals_involved_json")
+        if signals is None:
+            signals = evidence_dict if evidence_dict else incident_dict.get("associated_event_ids_json", "[]")
+        elif isinstance(signals, dict) and incident_dict.get("channel") is not None and "channel" not in signals:
+            signals = {**signals, "channel": incident_dict.get("channel")}
+
         if isinstance(signals, (list, dict)):
             signals_involved_json = json.dumps(signals)
         else:
@@ -1373,9 +1422,12 @@ def insert_incident(
             remediation_steps = str(remediation_steps_raw or "[]")
         updated_at = int(incident_dict.get("updated_at") or last_epoch_ms or now_ms)
 
-        mitre_technique_id = str(incident_dict.get("mitre_technique_id") or incident_dict.get("technique_id") or "T1200")
-        mitre_technique_name = str(incident_dict.get("mitre_technique_name") or incident_dict.get("technique_name") or "")
-        mitre_tactic = str(incident_dict.get("mitre_tactic") or incident_dict.get("tactic") or "")
+        mitre_technique_id, mitre_technique_name, mitre_tactic = _resolve_mitre_defaults(
+            primary_type,
+            incident_dict.get("mitre_technique_id") or incident_dict.get("technique_id"),
+            incident_dict.get("mitre_technique_name") or incident_dict.get("technique_name"),
+            incident_dict.get("mitre_tactic") or incident_dict.get("tactic"),
+        )
         evidence_hash = str(incident_dict.get("evidence_hash") or "")
         if not evidence_hash:
             payload = signals_involved_json if signals_involved_json else json.dumps({"incident_id": inc_id, "start_epoch_ms": start_epoch_ms})
@@ -1774,6 +1826,121 @@ def fetch_active_incidents(conn: Optional[sqlite3.Connection] = None) -> List[Di
             "ORDER BY start_epoch_ms DESC;"
         )
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        if close_on_exit:
+            conn.close()
+
+def _enrich_incident_row(conn: sqlite3.Connection, row_dict: Dict[str, Any]) -> Dict[str, Any]:
+    cursor = conn.cursor()
+    ev_type = str(row_dict.get("event_type") or row_dict.get("primary_type") or "")
+    m_id, m_name, m_tactic = _resolve_mitre_defaults(
+        ev_type,
+        row_dict.get("mitre_technique_id"),
+        row_dict.get("mitre_technique_name"),
+        row_dict.get("mitre_tactic"),
+    )
+    row_dict["mitre_technique_id"] = m_id
+    row_dict["mitre_technique_name"] = m_name
+    row_dict["mitre_tactic"] = m_tactic
+
+    evidence: Dict[str, Any] = {}
+    raw_sig = row_dict.get("signals_involved_json")
+    if isinstance(raw_sig, dict):
+        evidence = dict(raw_sig)
+    elif isinstance(raw_sig, str) and raw_sig.strip():
+        try:
+            parsed = json.loads(raw_sig)
+            if isinstance(parsed, dict):
+                evidence = parsed
+        except Exception:
+            pass
+
+    start_win = int(row_dict.get("start_window") or 0)
+    if not evidence:
+        assoc_ids: List[str] = []
+        raw_assoc = row_dict.get("associated_event_ids_json")
+        if isinstance(raw_assoc, str) and raw_assoc.strip():
+            try:
+                parsed_assoc = json.loads(raw_assoc)
+                if isinstance(parsed_assoc, list):
+                    assoc_ids = [str(x) for x in parsed_assoc if x]
+            except Exception:
+                pass
+        if assoc_ids:
+            cursor.execute(
+                "SELECT window_id, evidence_json FROM alert_events WHERE event_id = ? LIMIT 1;",
+                (assoc_ids[0],),
+            )
+            ev_row = cursor.fetchone()
+            if ev_row:
+                if start_win == 0 and ev_row["window_id"]:
+                    start_win = int(ev_row["window_id"])
+                try:
+                    parsed_ev = json.loads(ev_row["evidence_json"] or "{}")
+                    if isinstance(parsed_ev, dict):
+                        evidence = parsed_ev
+                except Exception:
+                    pass
+        if not evidence and start_win > 0:
+            cursor.execute(
+                "SELECT evidence_json FROM alert_events WHERE window_id = ? ORDER BY epoch_ms DESC LIMIT 1;",
+                (start_win,),
+            )
+            ev_row = cursor.fetchone()
+            if ev_row:
+                try:
+                    parsed_ev = json.loads(ev_row["evidence_json"] or "{}")
+                    if isinstance(parsed_ev, dict):
+                        evidence = parsed_ev
+                except Exception:
+                    pass
+
+    if start_win == 0 and evidence.get("window_id"):
+        try:
+            start_win = int(evidence["window_id"])
+        except (ValueError, TypeError):
+            pass
+
+    row_dict["window_id"] = start_win
+    if not row_dict.get("start_window") and start_win:
+        row_dict["start_window"] = start_win
+
+    channel = evidence.get("channel")
+    if channel is None and start_win > 0:
+        cursor.execute(
+            "SELECT channel FROM telemetry_windows WHERE window_id = ? LIMIT 1;",
+            (start_win,),
+        )
+        tw_row = cursor.fetchone()
+        if tw_row and tw_row["channel"] is not None:
+            channel = int(tw_row["channel"])
+    if channel is not None:
+        row_dict["channel"] = channel
+
+    row_dict["evidence"] = evidence
+    return row_dict
+
+def fetch_all_incidents(conn: Optional[sqlite3.Connection] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    close_on_exit = False
+    if conn is None:
+        conn = get_connection()
+        close_on_exit = True
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, incident_id, start_epoch_ms, end_epoch_ms, last_epoch_ms, "
+            "       start_window, last_window, event_type, primary_type, severity, "
+            "       confidence, status, event_count, associated_event_ids_json, "
+            "       signals_involved_json, target_bssid, summary, title, analyst_notes, "
+            "       attacker_mac, target_mac, attacker_rssi, tool_signature, deauth_reason, proximity_zone, "
+            "       raw_injection_count, is_laa_randomized, hardware_profile, remediation_advisory, "
+            "       mitre_technique_id, mitre_technique_name, mitre_tactic, evidence_hash, remediation_steps, updated_at "
+            "FROM incidents "
+            "ORDER BY start_epoch_ms DESC "
+            "LIMIT ?;",
+            (limit,)
+        )
+        return [_enrich_incident_row(conn, dict(row)) for row in cursor.fetchall()]
     finally:
         if close_on_exit:
             conn.close()

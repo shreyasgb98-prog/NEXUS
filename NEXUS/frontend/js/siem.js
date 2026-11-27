@@ -1,4 +1,4 @@
-// NEXUS AI: Wazuh-Style SIEM Log Explorer
+// NEXUS AI: SIEM Log Explorer
 // Reactive filter bar, field sidebar, mini-histogram, and expandable document rows
 // for high-density telemetry window inspection.
 

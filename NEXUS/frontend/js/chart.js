@@ -117,19 +117,94 @@ class TelemetryChart {
         }, 5000);
     }
 
+    getPalette() {
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        if (isLight) {
+            return {
+                isLight: true,
+                bg: '#ffffff',
+                emptyText: '#475569',
+                mutedStroke: '#e2e8f0',
+                mutedText: '#475569',
+                gridLine: '#e2e8f0',
+                divider: '#cbd5e1',
+                axisText: '#475569',
+                nowText: '#0284c7',
+                titleText: '#0f172a',
+                subText: '#475569',
+                envelopeStroke: 'rgba(71, 85, 105, 0.45)',
+                attackFill: 'rgba(190, 18, 60, 0.10)',
+                attackStroke: '#be123c',
+                attackText: '#be123c',
+                anomalyFill: '#be123c',
+                anomalyStroke: '#ffffff',
+                highlightColor: '#0284c7',
+                crosshair: 'rgba(15, 23, 42, 0.45)',
+                tooltipBg: '#ffffff',
+                tooltipBorder: '#64748b',
+                tooltipTitle: '#0f172a',
+                tracks: {
+                    deauth: { color: '#0284c7', bg: 'rgba(2, 132, 199, 0.12)' },
+                    mgmt:   { color: '#15803d', bg: 'rgba(21, 128, 61, 0.10)' },
+                    ble:    { color: '#b45309', bg: 'rgba(180, 83, 9, 0.10)' },
+                    rogue:  { color: '#be123c', bg: 'rgba(190, 18, 60, 0.12)' }
+                }
+            };
+        }
+        return {
+            isLight: false,
+            bg: '#0d0d0f',
+            emptyText: '#94a3b8',
+            mutedStroke: '#1e1e24',
+            mutedText: '#64748b',
+            gridLine: null,
+            divider: '#2c2c31',
+            axisText: '#94a3b8',
+            nowText: '#38bdf8',
+            titleText: '#f4f4f5',
+            subText: '#94a3b8',
+            envelopeStroke: 'rgba(148, 163, 184, 0.35)',
+            attackFill: 'rgba(244, 63, 94, 0.12)',
+            attackStroke: 'rgba(244, 63, 94, 0.45)',
+            attackText: '#f43f5e',
+            anomalyFill: '#f43f5e',
+            anomalyStroke: '#ffffff',
+            highlightColor: '#38bdf8',
+            crosshair: 'rgba(255, 255, 255, 0.65)',
+            tooltipBg: '#18181b',
+            tooltipBorder: '#38383e',
+            tooltipTitle: '#ffffff',
+            tracks: {
+                deauth: { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.08)' },
+                mgmt:   { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.08)' },
+                ble:    { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.08)' },
+                rogue:  { color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.08)' }
+            }
+        };
+    }
+
     render() {
         const { ctx, canvas } = this;
         if (!canvas || !ctx) return;
-        const width = parseFloat(canvas.style.width) || canvas.width;
-        const height = parseFloat(canvas.style.height) || canvas.height;
+        let width = parseFloat(canvas.style.width) || canvas.width;
+        let height = parseFloat(canvas.style.height) || canvas.height;
+        if ((parseFloat(canvas.style.width) <= 0 || canvas.width <= 0 || parseFloat(canvas.style.height) <= 0 || canvas.height <= 0) && !this._resizing) {
+            this._resizing = true;
+            this.resize();
+            this._resizing = false;
+            width = parseFloat(canvas.style.width) || canvas.width;
+            height = parseFloat(canvas.style.height) || canvas.height;
+        }
         if (width <= 0 || height <= 0) return;
 
-        // Dark phosphor CRT background
-        ctx.fillStyle = '#0d0d0f';
+        const palette = this.getPalette();
+
+        // Theme-aware canvas background
+        ctx.fillStyle = palette.bg;
         ctx.fillRect(0, 0, width, height);
 
         if (this.history.length < 2) {
-            ctx.fillStyle = '#94a3b8';
+            ctx.fillStyle = palette.emptyText;
             ctx.font = '11px Consolas, monospace';
             ctx.textAlign = 'left';
             ctx.fillText('Awaiting telemetry stream...', 16, 28);
@@ -149,7 +224,7 @@ class TelemetryChart {
         const offset = this.maxPoints - this.history.length;
 
         // 1. Render Grouped Contiguous Attack Windows across all tracks
-        this.renderContiguousAttackSpans(ctx, offset, step, leftPad, topPad, totalPlotHeight);
+        this.renderContiguousAttackSpans(ctx, offset, step, leftPad, topPad, totalPlotHeight, palette);
 
         // 2. Render each of the 4 synchronized tracks
         this.tracks.forEach((track, tIdx) => {
@@ -158,78 +233,97 @@ class TelemetryChart {
 
             if (track.hidden) {
                 // If track is hidden via signal selector, draw muted empty baseline
-                ctx.strokeStyle = '#1e1e24';
+                ctx.strokeStyle = palette.mutedStroke;
                 ctx.lineWidth = 1;
                 ctx.beginPath();
                 ctx.moveTo(0, trackBottom);
                 ctx.lineTo(leftPad + plotWidth, trackBottom);
                 ctx.stroke();
 
-                ctx.fillStyle = '#64748b';
+                ctx.fillStyle = palette.mutedText;
                 ctx.font = '9px Consolas, monospace';
                 ctx.textAlign = 'left';
                 ctx.fillText(`[MUTED] ${track.label}`, 12, trackTop + (trackHeight / 2) + 3);
                 return;
             }
 
-            this.renderTrack(ctx, track, tIdx, trackTop, trackBottom, trackHeight, offset, step, leftPad, plotWidth);
+            this.renderTrack(ctx, track, tIdx, trackTop, trackBottom, trackHeight, offset, step, leftPad, plotWidth, palette);
         });
 
         // 3. Render time / window X-axis labels at bottom
-        this.renderXAxis(ctx, offset, step, leftPad, width, height, bottomPad);
+        this.renderXAxis(ctx, offset, step, leftPad, width, height, bottomPad, palette);
 
         // 4. Render window highlight line if triggered via chat badge
         if (this.highlightedWindowId != null) {
-            this.renderWindowHighlight(ctx, offset, step, leftPad, topPad, totalPlotHeight);
+            this.renderWindowHighlight(ctx, offset, step, leftPad, topPad, totalPlotHeight, palette);
         }
 
         // 5. Render interactive crosshair scrubber and tooltip if hovering
         if (this.hoverIndex >= 0 && this.hoverIndex < this.history.length) {
-            this.renderScrubber(ctx, offset, step, leftPad, topPad, totalPlotHeight, width);
+            this.renderScrubber(ctx, offset, step, leftPad, topPad, totalPlotHeight, width, palette);
         }
     }
 
-    renderContiguousAttackSpans(ctx, offset, step, leftPad, topPad, totalPlotHeight) {
+    renderContiguousAttackSpans(ctx, offset, step, leftPad, topPad, totalPlotHeight, palette) {
         let spanStart = -1;
         for (let i = 0; i < this.history.length; i++) {
-            const isAttack = this.history[i].is_attack_labelled === 1;
+            const pt = this.history[i];
+            const hasSignal =
+                (pt.signals?.deauth?.observed || 0) > 0 ||
+                (pt.signals?.rogue?.observed || 0) > 0 ||
+                Boolean(pt.signals?.deauth?.flagged) ||
+                Boolean(pt.signals?.rogue?.flagged) ||
+                Boolean(pt.signals?.ble?.flagged);
+            const isAttack = pt.is_attack_labelled === 1 && hasSignal;
             if (isAttack && spanStart === -1) {
                 spanStart = i;
             } else if (!isAttack && spanStart !== -1) {
-                this.drawAttackSpan(ctx, spanStart, i - 1, offset, step, leftPad, topPad, totalPlotHeight);
+                this.drawAttackSpan(ctx, spanStart, i - 1, offset, step, leftPad, topPad, totalPlotHeight, palette);
                 spanStart = -1;
             }
         }
         if (spanStart !== -1) {
-            this.drawAttackSpan(ctx, spanStart, this.history.length - 1, offset, step, leftPad, topPad, totalPlotHeight);
+            this.drawAttackSpan(ctx, spanStart, this.history.length - 1, offset, step, leftPad, topPad, totalPlotHeight, palette);
         }
     }
 
-    drawAttackSpan(ctx, startIdx, endIdx, offset, step, leftPad, topPad, totalPlotHeight) {
+    drawAttackSpan(ctx, startIdx, endIdx, offset, step, leftPad, topPad, totalPlotHeight, palette) {
         const x1 = leftPad + ((startIdx + offset) * step);
         const x2 = leftPad + ((endIdx + offset) * step);
         const w = Math.max(x2 - x1, step);
 
-        ctx.fillStyle = 'rgba(244, 63, 94, 0.12)';
+        ctx.fillStyle = palette.attackFill;
         ctx.fillRect(x1 - (step / 2), topPad, w, totalPlotHeight);
 
         // Border accents
-        ctx.strokeStyle = 'rgba(244, 63, 94, 0.45)';
+        ctx.strokeStyle = palette.attackStroke;
         ctx.lineWidth = 1;
         ctx.strokeRect(x1 - (step / 2), topPad, w, totalPlotHeight);
 
         // Centered "ATTACK" label if span is at least 36px wide
         if (w >= 36) {
-            ctx.fillStyle = '#f43f5e';
+            ctx.fillStyle = palette.attackText;
             ctx.font = 'bold 9px Consolas, monospace';
             ctx.textAlign = 'center';
             ctx.fillText('ATTACK', x1 - (step / 2) + (w / 2), topPad + 12);
         }
     }
 
-    renderTrack(ctx, track, tIdx, trackTop, trackBottom, trackHeight, offset, step, leftPad, plotWidth) {
+    renderTrack(ctx, track, tIdx, trackTop, trackBottom, trackHeight, offset, step, leftPad, plotWidth, palette) {
+        const trackColors = palette.tracks[track.key] || { color: track.color, bg: track.bg };
+
+        // Optional light-mode coordinate gridline at mid-track
+        if (palette.gridLine) {
+            ctx.strokeStyle = palette.gridLine;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(leftPad, trackTop + (trackHeight / 2));
+            ctx.lineTo(leftPad + plotWidth, trackTop + (trackHeight / 2));
+            ctx.stroke();
+        }
+
         // Track baseline separator hairline
-        ctx.strokeStyle = '#2c2c31';
+        ctx.strokeStyle = palette.divider;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(0, trackBottom);
@@ -283,13 +377,13 @@ class TelemetryChart {
                 ctx.lineTo(envelopePts[i].x, envelopePts[i].yLower);
             }
             ctx.closePath();
-            ctx.fillStyle = track.bg;
+            ctx.fillStyle = trackColors.bg;
             ctx.fill();
 
             // Dashed Mean Line
             ctx.beginPath();
             ctx.setLineDash([3, 3]);
-            ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+            ctx.strokeStyle = palette.envelopeStroke;
             ctx.lineWidth = 1;
             ctx.moveTo(envelopePts[0].x, envelopePts[0].yMean);
             for (let i = 1; i < envelopePts.length; i++) {
@@ -302,7 +396,7 @@ class TelemetryChart {
         // Draw Observed Signal Line
         if (observedPts.length > 1) {
             ctx.beginPath();
-            ctx.strokeStyle = track.color;
+            ctx.strokeStyle = trackColors.color;
             ctx.lineWidth = 1.75;
             this.drawSpline(ctx, observedPts);
             ctx.stroke();
@@ -312,9 +406,9 @@ class TelemetryChart {
                 if (pt.flagged) {
                     ctx.beginPath();
                     ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-                    ctx.fillStyle = '#f43f5e';
+                    ctx.fillStyle = palette.anomalyFill;
                     ctx.fill();
-                    ctx.strokeStyle = '#ffffff';
+                    ctx.strokeStyle = palette.anomalyStroke;
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
                 }
@@ -327,16 +421,16 @@ class TelemetryChart {
         const latestVal = latestSig ? latestSig.observed : 0;
         const latestMean = latestSig ? latestSig.mean.toFixed(1) : '0.0';
 
-        ctx.fillStyle = '#f4f4f5';
+        ctx.fillStyle = palette.titleText;
         ctx.font = 'bold 10px Inter, sans-serif';
         ctx.textAlign = 'left';
         ctx.fillText(track.label, 10, trackTop + 14);
 
-        ctx.fillStyle = track.color;
+        ctx.fillStyle = trackColors.color;
         ctx.font = 'bold 12px Consolas, monospace';
         ctx.fillText(`${latestVal} ${track.unit}`, 10, trackTop + 29);
 
-        ctx.fillStyle = '#94a3b8';
+        ctx.fillStyle = palette.subText;
         ctx.font = '9px Consolas, monospace';
         ctx.fillText(`μ: ${latestMean} | max: ${maxVal}`, 10, trackTop + 41);
     }
@@ -360,7 +454,7 @@ class TelemetryChart {
         }
     }
 
-    renderXAxis(ctx, offset, step, leftPad, width, height, bottomPad) {
+    renderXAxis(ctx, offset, step, leftPad, width, height, bottomPad, palette) {
         ctx.font = '10px Consolas, monospace';
         ctx.textAlign = 'center';
 
@@ -368,7 +462,7 @@ class TelemetryChart {
         const xNow = last ? Math.min(leftPad + ((this.history.length - 1 + offset) * step), width - 52) : -999;
 
         const labelInterval = 10;
-        ctx.fillStyle = '#94a3b8';
+        ctx.fillStyle = palette.axisText;
         for (let i = 0; i < this.history.length; i += labelInterval) {
             const pt = this.history[i];
             const x = leftPad + ((i + offset) * step);
@@ -382,16 +476,16 @@ class TelemetryChart {
 
         // Draw last window marker
         if (last) {
-            ctx.fillStyle = '#38bdf8';
+            ctx.fillStyle = palette.nowText;
             ctx.fillText(`W#${last.window_id} (NOW)`, xNow, height - 6);
         }
     }
 
-    renderWindowHighlight(ctx, offset, step, leftPad, topPad, totalPlotHeight) {
+    renderWindowHighlight(ctx, offset, step, leftPad, topPad, totalPlotHeight, palette) {
         const idx = this.history.findIndex(pt => pt.window_id === this.highlightedWindowId);
         if (idx !== -1) {
             const x = leftPad + ((idx + offset) * step);
-            ctx.strokeStyle = '#38bdf8';
+            ctx.strokeStyle = palette.highlightColor;
             ctx.lineWidth = 2;
             ctx.setLineDash([4, 2]);
             ctx.beginPath();
@@ -400,20 +494,20 @@ class TelemetryChart {
             ctx.stroke();
             ctx.setLineDash([]);
 
-            ctx.fillStyle = '#38bdf8';
+            ctx.fillStyle = palette.highlightColor;
             ctx.font = 'bold 10px Consolas, monospace';
             ctx.textAlign = 'center';
             ctx.fillText(`TARGET WIN #${this.highlightedWindowId}`, x, topPad + 10);
         }
     }
 
-    renderScrubber(ctx, offset, step, leftPad, topPad, totalPlotHeight, width) {
+    renderScrubber(ctx, offset, step, leftPad, topPad, totalPlotHeight, width, palette) {
         const pt = this.history[this.hoverIndex];
         if (!pt) return;
         const x = leftPad + ((this.hoverIndex + offset) * step);
 
         // Vertical Scrubber Line
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+        ctx.strokeStyle = palette.crosshair;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(x, topPad);
@@ -433,28 +527,28 @@ class TelemetryChart {
         if (tipX + tipW > width - 10) tipX = x - tipW - 12;
         const tipY = topPad + 12;
 
-        ctx.fillStyle = '#18181b';
+        ctx.fillStyle = palette.tooltipBg;
         ctx.fillRect(tipX, tipY, tipW, tipH);
-        ctx.strokeStyle = '#38383e';
+        ctx.strokeStyle = palette.tooltipBorder;
         ctx.lineWidth = 1;
         ctx.strokeRect(tipX, tipY, tipW, tipH);
 
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = palette.tooltipTitle;
         ctx.font = 'bold 10px Inter, sans-serif';
         ctx.textAlign = 'left';
         ctx.fillText(`Window #${pt.window_id} ${isAttack ? '[ATTACK]' : ''}`, tipX + 8, tipY + 16);
 
         ctx.font = '10px Consolas, monospace';
-        ctx.fillStyle = '#38bdf8';
+        ctx.fillStyle = palette.tracks.deauth.color;
         ctx.fillText(`Deauth: ${deauthVal} frames`, tipX + 8, tipY + 32);
 
-        ctx.fillStyle = '#22c55e';
+        ctx.fillStyle = palette.tracks.mgmt.color;
         ctx.fillText(`Mgmt:   ${mgmtVal} frames`, tipX + 8, tipY + 47);
 
-        ctx.fillStyle = '#f59e0b';
+        ctx.fillStyle = palette.tracks.ble.color;
         ctx.fillText(`BLE:    ${bleVal} adverts`, tipX + 8, tipY + 62);
 
-        ctx.fillStyle = '#f43f5e';
+        ctx.fillStyle = palette.tracks.rogue.color;
         ctx.fillText(`Rogue:  ${rogueVal} nodes`, tipX + 8, tipY + 77);
     }
 }

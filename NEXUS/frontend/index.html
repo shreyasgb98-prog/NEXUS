@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NEXUS AI - Defensive RF Telemetry Workstation</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=20261127i">
     <style>
         /* Accessible Workstation Keyboard Focus */
         :focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
@@ -23,9 +23,6 @@
         <div class="titlebar-left">
             <span class="titlebar-icon">&#x25C8;</span>
             <span class="titlebar-text">NEXUS AI Workstation &mdash; Passive Defensive RF Telemetry & Anomaly Detector [ESP32-S3]</span>
-        </div>
-        <div class="titlebar-right">
-            <span class="titlebar-badge" id="titlebarModeBadge">SIMULATION ACTIVE</span>
         </div>
     </header>
 
@@ -68,6 +65,7 @@
                 <div class="menu-divider"></div>
                 <button class="menu-action" id="menuToggleAssistant">Ask NEXUS AI Assistant <span class="hotkey">Ctrl+K</span></button>
                 <button class="menu-action" id="menuToggleAudio">Toggle Audio Alarm Synthesizer</button>
+                <button class="menu-action" id="menuToggleTheme">Toggle Light / Dark Theme</button>
             </div>
         </div>
 
@@ -85,7 +83,7 @@
             <div class="menu-dropdown">
                 <button class="menu-action" id="menuRunSweep">Compute Empirical Threshold Sweep (Z = 2.0 to 5.0)</button>
                 <button class="menu-action" id="menuToggleLab">Toggle Lab Mode (Attack Injections)</button>
-                <button class="menu-action" id="menuRunDemoScenario">Execute Scripted Evaluation Scenario (Wazuh)</button>
+                <button class="menu-action" id="menuRunDemoScenario">Execute Scripted Evaluation Scenario (Demo)</button>
             </div>
         </div>
 
@@ -135,6 +133,7 @@
             <button id="btnToggleLabMode" class="tool-btn" title="Toggle Lab Mode for synthetic injections">
                 <span class="lab-mode-dot"></span><span>Lab Mode: OFF</span>
             </button>
+            <button id="btnToggleTheme" class="tool-btn" title="Switch between Dark and Classic Win2K Light theme">Theme: Dark</button>
         </div>
 
         <!-- Replay Bar Controls (Shown when in Replay Mode) -->
@@ -294,18 +293,18 @@
                         <div class="breakdown-col">
                             <div class="breakdown-header">Threat Class</div>
                             <div id="distThreatTypes" class="dist-list">
-                                <!-- Populated dynamically by wazuh_console.js -->
+                                <!-- Populated dynamically by ops_console.js -->
                             </div>
                         </div>
                         <div class="breakdown-col">
                             <div class="breakdown-header">Severity Profile</div>
                             <div id="distSeverity" class="dist-list">
-                                <!-- Populated dynamically by wazuh_console.js -->
+                                <!-- Populated dynamically by ops_console.js -->
                             </div>
                         </div>
                     </div>
 
-                    <!-- Hidden helper targets for wazuh_console.js -->
+                    <!-- Hidden helper targets for ops_console.js -->
                     <div id="distSources" style="display: none;"></div>
                     <canvas id="eventsHistogramCanvas" style="display: none;"></canvas>
                     <span id="filterActiveRangeText" style="display: none;"></span>
@@ -327,19 +326,33 @@
                             <button id="btnExportReport" class="tool-btn tool-btn-sm" title="Generate compliance report">Export Report</button>
                         </div>
                     </div>
+                    <div id="incidentStatusTabs" class="incident-status-tabs" role="tablist" aria-label="Incident Status Filter">
+                        <button type="button" class="inc-filter-tab active" data-status-filter="ALL" role="tab" aria-selected="true">
+                            All <span id="cntIncAll" class="tab-badge">0</span>
+                        </button>
+                        <button type="button" class="inc-filter-tab" data-status-filter="OPEN" role="tab" aria-selected="false">
+                            Open <span id="cntIncOpen" class="tab-badge">0</span>
+                        </button>
+                        <button type="button" class="inc-filter-tab" data-status-filter="ACKNOWLEDGED" role="tab" aria-selected="false">
+                            Acknowledged <span id="cntIncAck" class="tab-badge">0</span>
+                        </button>
+                        <button type="button" class="inc-filter-tab" data-status-filter="RESOLVED" role="tab" aria-selected="false">
+                            Resolved <span id="cntIncResolved" class="tab-badge">0</span>
+                        </button>
+                    </div>
                     <div class="table-scroll-wrapper">
                         <table class="workstation-table" id="incidentsTable">
                             <thead>
                                 <tr>
                                     <th style="width: 24px;"></th>
                                     <th>Incident ID</th>
+                                    <th>Status</th>
                                     <th>Trigger Window</th>
                                     <th>Classification</th>
                                     <th>Severity</th>
                                     <th>Attacker MAC</th>
                                     <th>Signature / Reason</th>
                                     <th>Proximity</th>
-                                    <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody id="incidentsTableBody">
@@ -462,6 +475,8 @@
                 <!-- View C: Trusted AP Allowlist Manager -->
                 <div class="ledger-table-container" id="trustedApsContainer" style="display: none;">
                     <div class="trusted-aps-form">
+                        <select id="selectTrustedDiscoveredAp" class="form-select font-mono" style="min-width: 240px;"><option value="">-- Scan Live Serial APs --</option></select>
+                        <button id="btnScanTrustedAps" class="tool-btn" type="button" title="Query nearby APs from ESP32-S3">&#x21BB; Scan</button>
                         <input type="text" id="inputNewBssid" class="form-input font-mono" placeholder="BSSID (e.g. 00:11:22:33:44:55)">
                         <input type="text" id="inputNewSsid" class="form-input" placeholder="SSID (e.g. Campus-Corp-Secure)">
                         <input type="number" id="inputNewChannel" class="form-input font-mono" placeholder="Channel (1-14)" min="1" max="14">
@@ -683,7 +698,7 @@
                             <button id="btnTestLlmConnection" class="tool-btn" style="width: 100%;">Test Endpoint Connection</button>
                         </div>
                         <div class="form-row" id="llmStatusContainer" style="margin-top: 6px; display: none;">
-                            <div id="llmStatusBox" class="sunken-panel font-mono" style="padding: 4px 8px; font-size: 11px; border: 1px inset #111; background: #141416; width: 100%;">
+                            <div id="llmStatusBox" class="sunken-panel font-mono" style="padding: 4px 8px; font-size: 11px; width: 100%;">
                                 <span id="llmStatusText">Ready</span>
                             </div>
                         </div>
@@ -745,6 +760,13 @@
                             </table>
                         </div>
                         <div class="form-row">
+                            <label for="selectDiscoveredAp">Discovered APs (Live Serial)</label>
+                            <div style="display: flex; gap: 6px; width: 100%;">
+                                <select id="selectDiscoveredAp" class="form-select font-mono" style="flex: 1;"><option value="">-- Connect Live Serial &amp; Scan --</option></select>
+                                <button id="btnScanDiscoveredAps" class="tool-btn" type="button" title="Query nearby APs from ESP32-S3">&#x21BB; Scan</button>
+                            </div>
+                        </div>
+                        <div class="form-row">
                             <label for="inputWhitelistSsid">Trusted Network SSID</label>
                             <input type="text" id="inputWhitelistSsid" class="form-input font-mono" placeholder="e.g. Campus-Corp-Secure">
                         </div>
@@ -755,6 +777,25 @@
                         <div style="display: flex; gap: 6px; margin-top: 8px;">
                             <button id="btnCommitWhitelist" class="tool-btn tool-btn-primary" style="flex: 1;" title="Commit whitelist entry to ESP32 Non-Volatile Storage">Commit to ESP32 Flash</button>
                             <button id="btnPurgeWhitelist" class="tool-btn" style="flex: 1;" title="Clear all whitelisted networks from device NVS">Purge Device NVS</button>
+                        </div>
+                    </div>
+
+                    <!-- Column 6: ESP32 MicroSD Black-Box Logs -->
+                    <div class="workstation-groupbox" id="groupboxSdLogs">
+                        <div class="groupbox-title">ESP32 MicroSD Black-Box Logs (Web Serial)</div>
+                        <div class="form-row">
+                            <label>MicroSD Storage Status</label>
+                            <div id="sdLogStatus" class="sunken-panel font-mono" style="padding: 4px 8px; font-size: 11px; color: var(--text-secondary);">SD: AWAITING CHECK</div>
+                        </div>
+                        <div class="form-row">
+                            <label>Transfer Progress</label>
+                            <div id="sdTransferProgress" class="sunken-panel font-mono" style="padding: 4px 8px; font-size: 11px; color: var(--text-muted);">Idle</div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px;">
+                            <button id="btnSdCheck" class="tool-btn" title="Query MicroSD card status and log file sizes">Check SD</button>
+                            <button id="btnSdDownloadJsonl" class="tool-btn tool-btn-primary" title="Download /nexus_logs.jsonl over Web Serial">Download JSONL</button>
+                            <button id="btnSdDownloadCsv" class="tool-btn tool-btn-primary" title="Download /nexus_logs.csv over Web Serial">Download CSV</button>
+                            <button id="btnSdDelete" class="tool-btn tool-btn-danger" title="Delete MicroSD log files on ESP32">Delete SD Logs</button>
                         </div>
                     </div>
                 </div>
@@ -938,14 +979,14 @@
     </div>
 
     <!-- Core Subsystems & Application Coordinator Scripts -->
-    <script src="js/chart.js"></script>
-    <script src="js/serial.js"></script>
-    <script src="js/incidents.js"></script>
-    <script src="js/assistant.js"></script>
-    <script src="js/wazuh_console.js"></script>
-    <script src="js/telemetry_table.js"></script>
-    <script src="js/settings.js"></script>
-    <script src="js/evaluation.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/chart.js?v=20261127b"></script>
+    <script src="js/serial.js?v=20261127h"></script>
+    <script src="js/incidents.js?v=20261127l"></script>
+    <script src="js/assistant.js?v=20261127b"></script>
+    <script src="js/ops_console.js?v=20261127l"></script>
+    <script src="js/telemetry_table.js?v=20261127b"></script>
+    <script src="js/settings.js?v=20261127b"></script>
+    <script src="js/evaluation.js?v=20261127b"></script>
+    <script src="js/app.js?v=20261127l"></script>
 </body>
 </html>

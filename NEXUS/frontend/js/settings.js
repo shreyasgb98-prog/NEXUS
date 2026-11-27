@@ -166,8 +166,8 @@ class SettingsManager {
         }
 
         const app = window.nexusApp;
-        if (app && app.wazuhConsole) {
-            app.wazuhConsole.showToast('SETTINGS SAVED', 'Local Ollama endpoint, model parameters, and retention policies updated.', 'success', 4000);
+        if (app && app.opsConsole) {
+            app.opsConsole.showToast('SETTINGS SAVED', 'Local Ollama endpoint, model parameters, and retention policies updated.', 'success', 4000);
         }
     }
 
@@ -226,8 +226,8 @@ class SettingsManager {
                 }
 
                 const app = window.nexusApp;
-                if (app && app.wazuhConsole) {
-                    app.wazuhConsole.showToast('ENDPOINT ONLINE', `Ollama Online (${latency}ms) | Model '${model}' ${data.model_found ? 'Ready' : 'Not Loaded'}`, 'success');
+                if (app && app.opsConsole) {
+                    app.opsConsole.showToast('ENDPOINT ONLINE', `Ollama Online (${latency}ms) | Model '${model}' ${data.model_found ? 'Ready' : 'Not Loaded'}`, 'success');
                 }
             } else {
                 const errStr = data.error || 'Connection refused';
@@ -241,8 +241,8 @@ class SettingsManager {
                     btn.style.borderColor = '#ef4444';
                 }
                 const app = window.nexusApp;
-                if (app && app.wazuhConsole) {
-                    app.wazuhConsole.showToast('AI OFFLINE', `AI Offline (Rule-Based Fallback Active): ${errStr}`, 'danger');
+                if (app && app.opsConsole) {
+                    app.opsConsole.showToast('AI OFFLINE', `AI Offline (Rule-Based Fallback Active): ${errStr}`, 'danger');
                 }
             }
         } catch (err) {
@@ -258,8 +258,8 @@ class SettingsManager {
                 btn.style.borderColor = '#ef4444';
             }
             const app = window.nexusApp;
-            if (app && app.wazuhConsole) {
-                app.wazuhConsole.showToast('ENDPOINT OFFLINE', `Ollama Offline: ${errStr}`, 'danger');
+            if (app && app.opsConsole) {
+                app.opsConsole.showToast('ENDPOINT OFFLINE', `Ollama Offline: ${errStr}`, 'danger');
             }
         } finally {
             if (btn) {

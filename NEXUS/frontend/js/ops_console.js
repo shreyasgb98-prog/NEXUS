@@ -1,9 +1,9 @@
-// NEXUS AI: Wazuh-Style Operations Console Module
+// NEXUS AI: Operations Console Module
 // Manages Global Time Filter Bar, Events-Over-Time Stacked Histogram with Drag-to-Select Scrubbing,
 // Top-N Distribution Panels, MITRE ATT&CK Matrix Filtering, Demo Script Runner with Toasts,
 // and Print Report Generation.
 
-class WazuhConsoleManager {
+class OpsConsoleManager {
     constructor() {
         this.activeTimeRange = '15m'; // '15m', '1h', '24h', or 'custom'
         this.customRangeStart = null;
@@ -38,7 +38,7 @@ class WazuhConsoleManager {
     }
 
     // ==========================================
-    // 1. Wazuh-Style Global Filter Bar
+    // 1. Ops-Console Global Filter Bar
     // ==========================================
     initFilterBar() {
         // Time range buttons
@@ -114,7 +114,7 @@ class WazuhConsoleManager {
     }
 
     // ==========================================
-    // 2. Events-Over-Time Histogram (Wazuh Stacked Severity)
+    // 2. Events-Over-Time Histogram (Ops-Console Stacked Severity)
     // ==========================================
     initHistogram() {
         const canvas = document.getElementById('eventsHistogramCanvas');
@@ -475,7 +475,7 @@ class WazuhConsoleManager {
             tile.classList.add('mitre-highlight-pulse');
             setTimeout(() => tile.classList.remove('mitre-highlight-pulse'), 3000);
         });
-        const panel = document.getElementById('sec-wazuh');
+        const panel = document.getElementById('mitreMatrixContainer');
         if (panel) {
             panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
@@ -491,11 +491,39 @@ class WazuhConsoleManager {
         }
     }
 
+    runDemoAttackStages(app, btn, baseDelayMs = 10000) {
+        // Stage 2: Deauth Flood Burst
+        setTimeout(() => {
+            this.showToast('STAGE 2/3: DEAUTH FLOOD ATTACK', 'Adversary injecting 802.11 deauth frame burst. Adaptive z-score spiking (>12σ)!', 'danger', 12000);
+            app.triggerSyntheticAttack('deauth');
+        }, baseDelayMs);
+
+        // Stage 3: Rogue AP Injection
+        setTimeout(() => {
+            this.showToast('STAGE 3/3: ROGUE AP INJECTION', 'Unauthorized BSSID 00:11:22:33:44:55 advertising cloned SSID "Campus-Corp-Secure" on Channel 6.', 'warning', 12000);
+            app.triggerSyntheticAttack('rogue');
+        }, baseDelayMs + 14000);
+
+        // Completion
+        setTimeout(() => {
+            this.showToast('DEMO COMPLETE', 'Multi-vector attack successfully correlated and mitigated. Benchmark statistics updated.', 'success', 8000);
+            this.isDemoRunning = false;
+            if (btn) {
+                btn.disabled = false;
+                btn.classList.remove('active');
+                btn.innerHTML = `&#x25B6; Run Demo`;
+            }
+        }, baseDelayMs + 28000);
+    }
+
     runDemoScenario() {
         if (this.isDemoRunning) return;
         this.isDemoRunning = true;
         const app = window.nexusApp;
-        if (!app) return;
+        if (!app) {
+            this.isDemoRunning = false;
+            return;
+        }
 
         const btn = document.getElementById('btnRunDemo');
         if (btn) {
@@ -504,7 +532,26 @@ class WazuhConsoleManager {
             btn.textContent = 'Scenario In Progress...';
         }
 
-        // Reset cleanly into simulation mode
+        if (typeof app.switchTab === 'function') {
+            app.switchTab('rf-matrix');
+        }
+        if (app.chart) {
+            app.chart.resize();
+            app.chart.render();
+        }
+
+        const hasBaseline = app.windowCount >= 30 && !app.isWarmup;
+        if (hasBaseline) {
+            if (app.mode !== 'SIMULATION') {
+                app.setMode('SIMULATION');
+            }
+            app.startSimulation();
+            this.showToast('ATTACK DEMO STARTED', `Continuing from W#${app.windowCount} with converged baseline.`, 'info', 6000);
+            this.runDemoAttackStages(app, btn, 2000);
+            return;
+        }
+
+        // Reset cleanly into simulation mode for fresh baseline convergence
         app.setMode('SIMULATION');
         app.reset();
 
@@ -531,29 +578,7 @@ class WazuhConsoleManager {
                 // Stage 1 (0s after baseline): Baseline established
                 this.showToast('STAGE 1/3: CALM BASELINE', 'Steady-state RF baseline converged (30/30 windows). Monitoring ACTIVE.', 'info', 6000);
                 app.startSimulation();
-
-                // Stage 2 (10s): Deauth Flood Burst
-                setTimeout(() => {
-                    this.showToast('STAGE 2/3: DEAUTH FLOOD ATTACK', 'Adversary injecting 802.11 deauth frame burst. Adaptive z-score spiking (>12σ)!', 'danger', 12000);
-                    app.triggerSyntheticAttack('deauth');
-                }, 10000);
-
-                // Stage 3 (24s): Rogue AP Injection
-                setTimeout(() => {
-                    this.showToast('STAGE 3/3: ROGUE AP INJECTION', 'Unauthorized BSSID 00:11:22:33:44:55 advertising cloned SSID "Campus-Corp-Secure" on Channel 6.', 'warning', 12000);
-                    app.triggerSyntheticAttack('rogue');
-                }, 24000);
-
-                // Completion (38s)
-                setTimeout(() => {
-                    this.showToast('DEMO COMPLETE', 'Multi-vector attack successfully correlated and mitigated. Benchmark statistics updated.', 'success', 8000);
-                    this.isDemoRunning = false;
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.classList.remove('active');
-                        btn.innerHTML = `&#x25B6; Run Demo`;
-                    }
-                }, 38000);
+                this.runDemoAttackStages(app, btn, 10000);
             }
         }, 80);
     }

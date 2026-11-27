@@ -10,25 +10,31 @@ class IncidentManager {
         this.incidentCounter = 0;
         this.unacknowledgedCount = 0;
 
-        // Window range filter state
+        // Window range & status filter state
         this.windowFilterStart = null;
         this.windowFilterEnd = null;
         this.mitreFilter = null;
+        this.statusFilter = 'ALL';
 
         // Audio Alert Synthesizer State
-        this.audioEnabled = true;
+        this.audioEnabled = window.audioRadar ? Boolean(window.audioRadar.enabled) : false;
         this.audioCtx = null;
 
-        // Trusted AP Allowlist State
-        this.trustedAps = [
-            { bssid: '00:14:2D:E1:92:40', ssid: 'Campus-Corp-Secure', channel: 6, status: 'TRUSTED', first_seen: '2026-11-20 08:00:00' },
-            { bssid: '00:14:2D:E1:92:41', ssid: 'Campus-IoT-Telemetry', channel: 11, status: 'TRUSTED', first_seen: '2026-11-20 08:00:00' }
-        ];
+        // Trusted AP Allowlist State (seed demo APs strictly in Simulation mode)
+        const activeMode = localStorage.getItem('nexus_active_mode') || 'SIMULATION';
+        this.trustedAps = activeMode === 'SIMULATION' ? this.getDefaultSimulationTrustedAps() : [];
 
         // Active Rogue AP State
         this.activeRogueAlert = null;
 
         this.init();
+    }
+
+    getDefaultSimulationTrustedAps() {
+        return [
+            { bssid: '00:14:2D:E1:92:40', ssid: 'Campus-Corp-Secure', channel: 6, status: 'TRUSTED', first_seen: '2026-11-20 08:00:00' },
+            { bssid: '00:14:2D:E1:92:41', ssid: 'Campus-IoT-Telemetry', channel: 11, status: 'TRUSTED', first_seen: '2026-11-20 08:00:00' }
+        ];
     }
 
     init() {
@@ -43,6 +49,20 @@ class IncidentManager {
         const tabTelemetry = document.getElementById('tabShowTelemetry');
         const incContainer = document.getElementById('incidentsTableContainer');
         const apsContainer = document.getElementById('trustedApsContainer');
+
+        // Incident Status Filter Sub-Tabs
+        const statusTabs = document.querySelectorAll('#incidentStatusTabs .inc-filter-tab');
+        statusTabs.forEach(tab => {
+            tab.onclick = () => {
+                this.statusFilter = tab.dataset.statusFilter || 'ALL';
+                statusTabs.forEach(t => {
+                    const isAct = t === tab;
+                    t.classList.toggle('active', isAct);
+                    t.setAttribute('aria-selected', isAct ? 'true' : 'false');
+                });
+                this.renderIncidentsTable();
+            };
+        });
         const telContainer = document.getElementById('telemetryTableContainer');
 
         if (tabIncidents && tabTrustedAps && incContainer && apsContainer) {
@@ -210,8 +230,8 @@ class IncidentManager {
             btnElement.textContent = 'COPIED!';
             setTimeout(() => { btnElement.textContent = orig; }, 2000);
         }
-        if (window.nexusApp && window.nexusApp.wazuhConsole) {
-            window.nexusApp.wazuhConsole.showToast('SHA-256 COPIED', 'Evidence digest copied to clipboard.', 'info');
+        if (window.nexusApp && window.nexusApp.opsConsole) {
+            window.nexusApp.opsConsole.showToast('SHA-256 COPIED', 'Evidence digest copied to clipboard.', 'info');
         }
     }
 
@@ -242,7 +262,7 @@ class IncidentManager {
     }
 
     playHighSeverityAlertTone() {
-        if (!this.audioEnabled) return;
+        if (!this.audioEnabled || (window.audioRadar && !window.audioRadar.enabled)) return;
         try {
             const AudioCtx = window.AudioContext || window.webkitAudioContext;
             if (!AudioCtx) return;
@@ -289,7 +309,22 @@ class IncidentManager {
         }
     }
 
+    syncCounterFromIncidents() {
+        const now = new Date();
+        const prefix = `INC-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-`;
+        let maxSeq = this.incidentCounter || 0;
+        for (const inc of this.incidents) {
+            const idStr = String(inc.id || '');
+            if (idStr.startsWith(prefix)) {
+                const seq = parseInt(idStr.slice(prefix.length), 10);
+                if (!isNaN(seq) && seq > maxSeq) maxSeq = seq;
+            }
+        }
+        this.incidentCounter = maxSeq;
+    }
+
     createIncidentFromAlert(alertRecord) {
+        this.syncCounterFromIncidents();
         this.incidentCounter++;
         const now = new Date();
         const y = now.getFullYear();
@@ -301,41 +336,50 @@ class IncidentManager {
             ? alertRecord.evidence.features.map(f => f.feature)
             : ['deauth'];
 
-        const attackerMac = alertRecord.attacker_mac || (
+        const isLiveMode = window.nexusApp && window.nexusApp.mode !== 'SIMULATION';
+
+        const attackerMac = alertRecord.attacker_mac || (isLiveMode ? 'N/A (Aggregate)' : (
             alertRecord.type.includes('Deauth') ? '00:C0:CA:98:A2:14' :
             alertRecord.type.includes('evil-twin') || alertRecord.type.includes('access point') ? 'F4:F5:E8:21:99:3B' :
             alertRecord.type.includes('BLE') ? '4B:92:1F:08:4C:7A' : '24:A0:74:11:88:5B'
-        );
-        const toolSignature = alertRecord.tool_signature || (
+        ));
+        const toolSignature = alertRecord.tool_signature || (isLiveMode ? 'STATISTICAL ANOMALY' : (
             alertRecord.type.includes('Deauth') ? '[AIREPLAY-NG / REASON 7]' :
             alertRecord.type.includes('evil-twin') || alertRecord.type.includes('access point') ? '[EVIL-TWIN / HOSTAPD-MANA]' :
             alertRecord.type.includes('BLE') ? '[BLE-SPAM / FLIPPER ZERO]' : '[LEGITIMATE ROAM / REASON 3]'
-        );
-        const targetBssid = alertRecord.target_bssid || (
+        ));
+        const targetBssid = alertRecord.target_bssid || (isLiveMode ? 'N/A (Window)' : (
             alertRecord.type.includes('BLE') ? 'BROADCAST (ADV_IND)' : '00:14:2D:E1:92:40'
-        );
+        ));
         const frameChannel = alertRecord.channel || (window.nexusApp && window.nexusApp.primaryChannel) || 6;
-        const rssi = alertRecord.rssi || (alertRecord.severity === 'HIGH' ? -42 : alertRecord.severity === 'MEDIUM' ? -58 : -76);
+        const hasValidRssi = alertRecord.rssi !== undefined && alertRecord.rssi !== null && alertRecord.rssi !== 0;
+        const rssi = hasValidRssi
+            ? alertRecord.rssi
+            : (isLiveMode ? null : (alertRecord.severity === 'HIGH' ? -42 : alertRecord.severity === 'MEDIUM' ? -58 : -76));
 
-        let proximityZone = 'MID-RANGE (5-15m)';
-        let proximityClass = 'proximity-mid';
-        if (rssi >= -48) {
-            proximityZone = 'IMMEDIATE (< 3m)';
-            proximityClass = 'proximity-immediate';
-        } else if (rssi <= -72) {
-            proximityZone = 'PERIMETER (> 15m)';
-            proximityClass = 'proximity-perimeter';
+        let proximityZone = 'N/A';
+        let proximityClass = 'proximity-perimeter';
+        if (rssi !== null) {
+            proximityZone = 'MID-RANGE (5-15m)';
+            proximityClass = 'proximity-mid';
+            if (rssi >= -48) {
+                proximityZone = 'IMMEDIATE (< 3m)';
+                proximityClass = 'proximity-immediate';
+            } else if (rssi <= -72) {
+                proximityZone = 'PERIMETER (> 15m)';
+                proximityClass = 'proximity-perimeter';
+            }
         }
 
-        const hardwareProfile = alertRecord.hardware_profile || (
+        const hardwareProfile = alertRecord.hardware_profile || (isLiveMode ? 'N/A (Count-Only)' : (
             alertRecord.type.includes('Deauth') ? '[ESP8266/ESP32 DEAUTHER]' :
             (alertRecord.type.includes('evil-twin') || alertRecord.type.includes('access point')) ? '[SPOOFED LAA]' :
             alertRecord.type.includes('BLE') ? '[FLIPPER ZERO / CC2540]' : '[ESP8266/ESP32 DEAUTHER]'
-        );
+        ));
 
         const rawInjectionCount = (typeof alertRecord.raw_injection_count !== 'undefined')
             ? alertRecord.raw_injection_count
-            : (alertRecord.type.includes('Deauth') ? 142 : (alertRecord.type.includes('evil-twin') ? 38 : 0));
+            : (isLiveMode ? 0 : (alertRecord.type.includes('Deauth') ? 142 : (alertRecord.type.includes('evil-twin') ? 38 : 0)));
 
         const mitre = this.getMitreDetailsForType(alertRecord.type);
         const canonicalString = `${incId}|${now.getTime()}|${attackerMac}|${targetBssid}|0|${alertRecord.type}`;
@@ -415,34 +459,45 @@ class IncidentManager {
             if (evTag) {
                 const sev = String(incident.severity || 'HIGH').toUpperCase();
                 evTag.className = `status-pill ${sev === 'HIGH' || sev === 'CRITICAL' ? 'pill-high' : 'pill-medium'}`;
-                evTag.textContent = incident.id || `WIN-${incident.window_id ?? 0}`;
+                evTag.textContent = incident.id || `WIN-${incident.window_id ?? incident.start_window ?? '--'}`;
             }
 
             if (evView) {
-                let rawEvidence = incident.signals_involved_json || null;
-                if (typeof rawEvidence === 'string') {
-                    try {
-                        rawEvidence = JSON.stringify(JSON.parse(rawEvidence), null, 2);
-                    } catch (e) {
-                        // Keep raw string
+                let rawEvidenceObj = incident.evidence || null;
+                if (!rawEvidenceObj && incident.signals_involved_json) {
+                    if (typeof incident.signals_involved_json === 'string') {
+                        try {
+                            const parsed = JSON.parse(incident.signals_involved_json);
+                            const isLegacyEvIdList = Array.isArray(parsed) && (parsed.length === 0 || parsed.every(item => typeof item === 'string' && /^EV-/i.test(item)));
+                            if (!isLegacyEvIdList) {
+                                rawEvidenceObj = parsed;
+                            }
+                        } catch (e) {
+                            // Ignore malformed JSON and use structured summary fallback
+                        }
+                    } else if (typeof incident.signals_involved_json === 'object') {
+                        const arr = incident.signals_involved_json;
+                        const isLegacyEvIdList = Array.isArray(arr) && (arr.length === 0 || arr.every(item => typeof item === 'string' && /^EV-/i.test(item)));
+                        if (!isLegacyEvIdList) {
+                            rawEvidenceObj = arr;
+                        }
                     }
-                } else if (!rawEvidence) {
-                    rawEvidence = JSON.stringify({
-                        incident_id: incident.id,
-                        window_id: incident.window_id ?? incident.start_window ?? 0,
-                        type: incident.type || incident.title || incident.primary_type,
-                        severity: incident.severity,
-                        status: incident.status,
-                        attacker_mac: incident.attacker_mac || 'UNKNOWN',
-                        target_bssid: incident.target_bssid || 'UNKNOWN',
-                        channel: incident.channel || 6
-                    }, null, 2);
                 }
-                evView.textContent = rawEvidence;
+
+                if (!rawEvidenceObj) {
+                    rawEvidenceObj = {
+                        window_id: incident.window_id ?? incident.start_window ?? '--',
+                        type: incident.type || incident.title || incident.primary_type || 'Wireless Anomaly',
+                        severity: incident.severity,
+                        channel: incident.channel || (window.nexusApp && window.nexusApp.primaryChannel) || '--',
+                        rationale: incident.summary || incident.explanation || `${incident.type || 'Wireless Anomaly'} detected at window #${incident.window_id ?? incident.start_window ?? '--'}.`
+                    };
+                }
+                evView.textContent = typeof rawEvidenceObj === 'string' ? rawEvidenceObj : JSON.stringify(rawEvidenceObj, null, 2);
             }
 
             if (expView) {
-                expView.textContent = incident.summary || incident.explanation || `${incident.type || 'Wireless Anomaly'} detected at window #${incident.window_id ?? 0}.`;
+                expView.textContent = incident.summary || incident.explanation || `${incident.type || 'Wireless Anomaly'} detected at window #${incident.window_id ?? incident.start_window ?? '--'}.`;
             }
         }
     }
@@ -459,8 +514,8 @@ class IncidentManager {
         this.renderDefensivePlaybook(inc);
         const btnAck = document.getElementById('btnAckInc');
         if (btnAck) btnAck.disabled = true;
-        if (window.nexusApp && window.nexusApp.wazuhConsole) {
-            window.nexusApp.wazuhConsole.showToast('INCIDENT ACKNOWLEDGED', `${incId} status set to ACKNOWLEDGED.`, 'info');
+        if (window.nexusApp && window.nexusApp.opsConsole) {
+            window.nexusApp.opsConsole.showToast('INCIDENT ACKNOWLEDGED', `${incId} status set to ACKNOWLEDGED.`, 'info');
         }
         this.syncBackendStatus(incId, 'ACKNOWLEDGED');
     }
@@ -504,27 +559,41 @@ class IncidentManager {
         if (btnRes) btnRes.disabled = true;
         const btnAck = document.getElementById('btnAckInc');
         if (btnAck) btnAck.disabled = true;
-        if (window.nexusApp && window.nexusApp.wazuhConsole) {
-            window.nexusApp.wazuhConsole.showToast('INCIDENT RESOLVED', `${incId} status set to RESOLVED.`, 'success');
+        if (window.nexusApp && window.nexusApp.opsConsole) {
+            window.nexusApp.opsConsole.showToast('INCIDENT RESOLVED', `${incId} status set to RESOLVED.`, 'success');
         }
         this.syncBackendStatus(incId, 'RESOLVED');
     }
 
     async syncBackendStatus(incId, newStatus) {
+        const apiBase = (window.nexusApp && typeof window.nexusApp.getApiBase === 'function')
+            ? window.nexusApp.getApiBase()
+            : (window.location.port === '8000' ? '' : 'http://127.0.0.1:8000');
+        const dbMode = (window.nexusApp && window.nexusApp.mode === 'SIMULATION') ? 'simulation' : 'live';
         try {
-            await fetch(`/api/incidents/${incId}/status`, {
+            const resp = await fetch(`${apiBase}/api/incidents/${incId}/status?mode=${dbMode}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: newStatus, note: 'Operator updated status from UI' })
             });
+            if (!resp.ok) {
+                console.error(`[NEXUS] Failed to persist status for ${incId}: HTTP ${resp.status}`);
+                if (window.nexusApp && window.nexusApp.opsConsole) {
+                    window.nexusApp.opsConsole.showToast('PERSISTENCE ERROR', `Failed to save ${newStatus} for ${incId} (HTTP ${resp.status}).`, 'danger');
+                }
+            }
         } catch (e) {
-            // Standalone client state retained
+            console.error(`[NEXUS] Network error persisting status for ${incId}:`, e);
         }
     }
 
     async exportIncidentPcap(incId) {
+        const apiBase = (window.nexusApp && typeof window.nexusApp.getApiBase === 'function')
+            ? window.nexusApp.getApiBase()
+            : (window.location.port === '8000' ? '' : 'http://127.0.0.1:8000');
+        const dbMode = (window.nexusApp && window.nexusApp.mode === 'SIMULATION') ? 'simulation' : 'live';
         try {
-            const resp = await fetch(`http://127.0.0.1:8000/api/incidents/${incId}/pcap`);
+            const resp = await fetch(`${apiBase}/api/incidents/${incId}/pcap?mode=${dbMode}`);
             if (resp.ok) {
                 const blob = await resp.blob();
                 const url = window.URL.createObjectURL(blob);
@@ -535,8 +604,8 @@ class IncidentManager {
                 a.click();
                 a.remove();
                 window.URL.revokeObjectURL(url);
-                if (window.nexusApp && window.nexusApp.wazuhConsole) {
-                    window.nexusApp.wazuhConsole.showToast('PCAP EXPORT', `Exported binary PCAP for ${incId}.`, 'info');
+                if (window.nexusApp && window.nexusApp.opsConsole) {
+                    window.nexusApp.opsConsole.showToast('PCAP EXPORT', `Exported binary PCAP for ${incId}.`, 'info');
                 }
                 return;
             }
@@ -559,8 +628,10 @@ class IncidentManager {
             0x69, 0x00, 0x00, 0x00  // LinkType 105 (DLT_IEEE802_11)
         ]);
 
+        const macRegex = /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/;
         const parseMac = (macStr, fallback) => {
-            const clean = (macStr || fallback || '00:00:00:00:00:00').replace(/[-]/g, ':').split(':');
+            const candidate = (macStr && macRegex.test(macStr)) ? macStr : (fallback || '00:00:00:00:00:00');
+            const clean = candidate.replace(/[-]/g, ':').split(':');
             const bytes = new Uint8Array(6);
             for (let i = 0; i < 6; i++) {
                 bytes[i] = clean[i] ? (parseInt(clean[i], 16) || 0) : 0;
@@ -568,9 +639,10 @@ class IncidentManager {
             return bytes;
         };
 
+        const isLiveMode = window.nexusApp && window.nexusApp.mode !== 'SIMULATION';
         const destBytes = parseMac(inc ? inc.target_bssid : null, 'FF:FF:FF:FF:FF:FF');
-        const srcBytes = parseMac(inc ? inc.attacker_mac : null, '00:C0:CA:98:A2:14');
-        const bssidBytes = parseMac(inc ? inc.target_bssid : null, '00:14:2D:E1:92:40');
+        const srcBytes = parseMac(inc ? inc.attacker_mac : null, isLiveMode ? '00:00:00:00:00:00' : '00:C0:CA:98:A2:14');
+        const bssidBytes = parseMac(inc ? inc.target_bssid : null, isLiveMode ? '00:00:00:00:00:00' : '00:14:2D:E1:92:40');
         const reasonCode = (inc && inc.deauth_reason) ? (parseInt(inc.deauth_reason, 10) || 7) : 7;
 
         // Dynamic 802.11 subtype byte: 0xC0 for deauth bursts, 0x80 for beacon/rogue AP frames
@@ -617,8 +689,8 @@ class IncidentManager {
         a.click();
         a.remove();
         window.URL.revokeObjectURL(url);
-        if (window.nexusApp && window.nexusApp.wazuhConsole) {
-            window.nexusApp.wazuhConsole.showToast('PCAP EXPORT', `Exported binary PCAP for ${incId}.`, 'info');
+        if (window.nexusApp && window.nexusApp.opsConsole) {
+            window.nexusApp.opsConsole.showToast('PCAP EXPORT', `Exported binary PCAP for ${incId}.`, 'info');
         }
     }
 
@@ -646,6 +718,16 @@ class IncidentManager {
     renderIncidentsTable() {
         const tbody = document.getElementById('incidentsTableBody');
         if (!tbody) return;
+
+        // Update live status filter tab counts
+        const cntAll = document.getElementById('cntIncAll');
+        const cntOpen = document.getElementById('cntIncOpen');
+        const cntAck = document.getElementById('cntIncAck');
+        const cntResolved = document.getElementById('cntIncResolved');
+        if (cntAll) cntAll.textContent = String(this.incidents.length);
+        if (cntOpen) cntOpen.textContent = String(this.incidents.filter(i => i.status === 'OPEN').length);
+        if (cntAck) cntAck.textContent = String(this.incidents.filter(i => i.status === 'ACKNOWLEDGED').length);
+        if (cntResolved) cntResolved.textContent = String(this.incidents.filter(i => i.status === 'RESOLVED').length);
 
         // First-Run / Empty State
         if (this.incidents.length === 0) {
@@ -699,9 +781,15 @@ class IncidentManager {
             });
         }
 
+        if (this.statusFilter && this.statusFilter !== 'ALL') {
+            filteredIncidents = filteredIncidents.filter(inc => inc.status === this.statusFilter);
+        }
+
         if (filteredIncidents.length === 0) {
             let emptyMsg = 'Zero incidents recorded.';
-            if (this.windowFilterStart !== null && this.windowFilterEnd !== null) {
+            if (this.statusFilter && this.statusFilter !== 'ALL') {
+                emptyMsg = `Zero ${this.statusFilter.toLowerCase()} incidents recorded.`;
+            } else if (this.windowFilterStart !== null && this.windowFilterEnd !== null) {
                 emptyMsg = `Zero incidents recorded within scrubbed range W#${this.windowFilterStart} - W#${this.windowFilterEnd}.`;
             } else if (this.mitreFilter) {
                 emptyMsg = `Zero incidents matching MITRE ATT&amp;CK technique ${this.mitreFilter}.`;
@@ -730,30 +818,32 @@ class IncidentManager {
             else if (inc.status === 'RESOLVED') statusClass = 'pill-resolved';
             else if (inc.status === 'FALSE_POSITIVE') statusClass = 'pill-low';
 
-            const attackerMac = inc.attacker_mac || '24:A0:74:11:88:5B';
-            const toolSig = inc.tool_signature || '[UNKNOWN / REASON 0]';
+            const isLiveMode = window.nexusApp && window.nexusApp.mode !== 'SIMULATION';
+            const attackerMac = inc.attacker_mac || (isLiveMode ? 'N/A' : '24:A0:74:11:88:5B');
+            const toolSig = inc.tool_signature || (isLiveMode ? 'STATISTICAL ANOMALY' : '[UNKNOWN / REASON 0]');
             let sigClass = 'badge-sig-rose';
             if (toolSig.includes('AIREPLAY')) sigClass = 'badge-sig-amber';
             else if (toolSig.includes('ROAM')) sigClass = 'badge-sig-cyan';
 
-            const proxZone = inc.proximity_zone || 'MID-RANGE (5-15m)';
-            const proxClass = inc.proximity_class || 'proximity-mid';
+            const proxZone = inc.proximity_zone || (isLiveMode ? 'N/A' : 'MID-RANGE (5-15m)');
+            const proxClass = inc.proximity_class || (isLiveMode ? 'proximity-perimeter' : 'proximity-mid');
             const incMitre = inc.mitre || this.getMitreDetailsForType(inc.type);
             const incHash = inc.evidence_hash || (inc.evidence_hash = this.computeSha256(`${inc.id}|${inc.time}|${attackerMac}|${inc.target_bssid || ''}|0|${inc.type}`));
 
+            const isResolvedRow = inc.status === 'RESOLVED' || inc.status === 'FALSE_POSITIVE';
             html += `
-                <tr class="${isSelected ? 'selected' : ''}" data-inc-id="${inc.id}">
+                <tr class="${isSelected ? 'selected' : ''}${isResolvedRow ? ' row-resolved' : ''}" data-inc-id="${inc.id}">
                     <td style="width: 24px;">
                         <button class="expand-row-btn" data-inc-id="${inc.id}" title="Toggle Document Inspection">${isExpanded ? '&#x25BC;' : '&#x25B6;'}</button>
                     </td>
-                    <td class="font-mono font-bold" style="color: var(--accent-sky);">${inc.id}</td>
-                    <td class="font-mono">W#${inc.start_window} (${inc.time})</td>
-                    <td style="color: var(--text-white); font-weight: 500;">${inc.type}</td>
+                    <td class="font-mono font-bold" style="color: var(--accent-sky); white-space: nowrap;">${inc.id}</td>
+                    <td style="white-space: nowrap;"><span class="status-pill ${statusClass}">${inc.status}</span></td>
+                    <td class="font-mono" style="white-space: nowrap;">W#${inc.start_window ?? inc.window_id ?? '--'} (${inc.time})</td>
+                    <td style="color: var(--text-white); font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${inc.type}">${inc.type}</td>
                     <td><span class="status-pill ${sevClass}">${inc.severity}</span></td>
                     <td><span class="badge-mac">${attackerMac}</span></td>
                     <td><span class="badge-sig ${sigClass}">${toolSig}</span></td>
-                    <td><span class="badge-proximity ${proxClass}">${proxZone}</span></td>
-                    <td><span class="status-pill ${statusClass}">${inc.status}</span></td>
+                    <td style="white-space: nowrap;"><span class="badge-proximity ${proxClass}">${proxZone}</span></td>
                 </tr>
             `;
 
@@ -778,11 +868,11 @@ class IncidentManager {
                                             <tr><td>Classification</td><td>${inc.type}</td></tr>
                                             <tr><td>Severity & Confidence</td><td>${inc.severity} (Confidence: ${(inc.confidence * 100).toFixed(0)}%)</td></tr>
                                             <tr><td>Attacker MAC</td><td><span class="badge-mac">${attackerMac}</span></td></tr>
-                                            <tr><td>Hardware Profile</td><td><span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${inc.hardware_profile || '[ESP8266/ESP32 DEAUTHER]'}</span></td></tr>
+                                            <tr><td>Hardware Profile</td><td><span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${inc.hardware_profile || (isLiveMode ? 'N/A (Count-Only)' : '[ESP8266/ESP32 DEAUTHER]')}</span></td></tr>
                                             <tr><td>Injection Alert</td><td>${(inc.raw_injection_count && inc.raw_injection_count > 0) ? '<span style="color: var(--status-rose); font-weight: 700;">RAW FRAME INJECTION DETECTED (' + inc.raw_injection_count + ' frames)</span>' : '<span style="color: var(--text-muted);">None</span>'}</td></tr>
                                             <tr><td>Tool Attribution</td><td><span class="badge-sig ${sigClass}">${toolSig}</span></td></tr>
-                                            <tr><td>Proximity Zone</td><td><span class="badge-proximity ${proxClass}">${proxZone}</span> (${inc.rssi != null ? inc.rssi : -58} dBm)</td></tr>
-                                            <tr><td>Target BSSID / Ch</td><td class="font-mono">${inc.target_bssid || '00:14:2D:E1:92:40'} (Channel ${inc.channel || 6})</td></tr>
+                                            <tr><td>Proximity Zone</td><td><span class="badge-proximity ${proxClass}">${proxZone}</span>${inc.rssi != null ? ` (${inc.rssi} dBm)` : (isLiveMode ? '' : ' (-58 dBm)')}</td></tr>
+                                            <tr><td>Target BSSID / Ch</td><td class="font-mono">${inc.target_bssid || (isLiveMode ? 'N/A (Window)' : '00:14:2D:E1:92:40')} (Channel ${inc.channel || (window.nexusApp && window.nexusApp.primaryChannel) || '--'})</td></tr>
                                             <tr><td>Correlated Signals</td><td>${inc.correlated_signals.join(', ')}</td></tr>
                                             <tr><td>MITRE ATT&amp;CK</td><td>
                                                 <div class="mitre-badge-container">
@@ -923,14 +1013,15 @@ class IncidentManager {
             `).join('');
         }
 
-        const attackerMac = incident.attacker_mac || '24:A0:74:11:88:5B';
-        const toolSig = incident.tool_signature || '[UNKNOWN / REASON 0]';
+        const isLiveMode = window.nexusApp && window.nexusApp.mode !== 'SIMULATION';
+        const attackerMac = incident.attacker_mac || (isLiveMode ? 'N/A' : '24:A0:74:11:88:5B');
+        const toolSig = incident.tool_signature || (isLiveMode ? 'STATISTICAL ANOMALY' : '[UNKNOWN / REASON 0]');
         let sigClass = 'badge-sig-rose';
         if (toolSig.includes('AIREPLAY')) sigClass = 'badge-sig-amber';
         else if (toolSig.includes('ROAM')) sigClass = 'badge-sig-cyan';
 
-        const proxZone = incident.proximity_zone || 'MID-RANGE (5-15m)';
-        const proxClass = incident.proximity_class || 'proximity-mid';
+        const proxZone = incident.proximity_zone || (isLiveMode ? 'N/A' : 'MID-RANGE (5-15m)');
+        const proxClass = incident.proximity_class || (isLiveMode ? 'proximity-perimeter' : 'proximity-mid');
         const flyoutMitre = incident.mitre || this.getMitreDetailsForType(incident.type);
         const flyoutHash = incident.evidence_hash || (incident.evidence_hash = this.computeSha256(`${incident.id}|${incident.time}|${attackerMac}|${incident.target_bssid || ''}|0|${incident.type}`));
 
@@ -948,7 +1039,7 @@ class IncidentManager {
                 </div>
                 <div class="forensic-meta-item">
                     <strong>HARDWARE:</strong>
-                    <span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${incident.hardware_profile || '[ESP8266/ESP32 DEAUTHER]'}</span>
+                    <span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${incident.hardware_profile || (isLiveMode ? 'N/A (Count-Only)' : '[ESP8266/ESP32 DEAUTHER]')}</span>
                 </div>
                 <div class="forensic-meta-item">
                     <strong>SIGNATURE:</strong>
@@ -995,7 +1086,7 @@ class IncidentManager {
                 <button class="btn btn-sm" id="btnFlyoutPcap">&#x2913; Export PCAP</button>
                 <button class="btn btn-sm" id="btnFlyoutAck">Acknowledge</button>
                 <button class="btn btn-sm btn-danger" id="btnFlyoutFp">Mark False Positive</button>
-                <button class="btn btn-sm btn-primary" id="btnFlyoutRes">Resolve Incident</button>
+                <button class="btn btn-sm btn-primary" id="btnFlyoutRes">Resolved</button>
             </div>
         `;
 
@@ -1096,18 +1187,33 @@ class IncidentManager {
             </div>
         `).join('');
 
-        const playbookAttackerMac = incident.attacker_mac || '24:A0:74:11:88:5B';
-        const playbookToolSig = incident.tool_signature || '[UNKNOWN / REASON 0]';
+        const isLiveMode = window.nexusApp && window.nexusApp.mode !== 'SIMULATION';
+        const playbookAttackerMac = incident.attacker_mac || (isLiveMode ? 'N/A' : '24:A0:74:11:88:5B');
+        const playbookToolSig = incident.tool_signature || (isLiveMode ? 'STATISTICAL ANOMALY' : '[UNKNOWN / REASON 0]');
         let playbookSigClass = 'badge-sig-rose';
         if (playbookToolSig.includes('AIREPLAY')) playbookSigClass = 'badge-sig-amber';
         else if (playbookToolSig.includes('ROAM')) playbookSigClass = 'badge-sig-cyan';
 
-        const playbookProxZone = incident.proximity_zone || 'MID-RANGE (5-15m)';
-        const playbookProxClass = incident.proximity_class || 'proximity-mid';
-        const playbookTargetBssid = incident.target_bssid || '00:14:2D:E1:92:40';
-        const playbookChannel = incident.channel || 6;
+        const playbookProxZone = incident.proximity_zone || (isLiveMode ? 'N/A' : 'MID-RANGE (5-15m)');
+        const playbookProxClass = incident.proximity_class || (isLiveMode ? 'proximity-perimeter' : 'proximity-mid');
+        const playbookTargetBssid = incident.target_bssid || (isLiveMode ? 'N/A (Window)' : '00:14:2D:E1:92:40');
+        const playbookChannel = incident.channel || (window.nexusApp && window.nexusApp.primaryChannel) || '--';
+        const playbookWin = incident.start_window ?? incident.window_id ?? '--';
+        const playbookConf = (typeof incident.confidence === 'number') ? `${(incident.confidence * 100).toFixed(0)}%` : '--';
+        const isCountOnlyLive = isLiveMode && !incident.raw_packets && (!incident.raw_injection_count || incident.raw_injection_count === 0);
+        const pcapLabel = isCountOnlyLive ? '&#x2913; Export Synthetic PCAP' : '&#x2913; Export Incident PCAP';
+        const pcapTitle = isCountOnlyLive
+            ? 'Synthesizes a Wireshark-compatible 802.11 frame from aggregate live telemetry counts (ESP32 serial stream sends counts, not raw PCAP bytes)'
+            : 'Download binary Wireshark PCAP capture';
         const playbookMitre = incident.mitre || this.getMitreDetailsForType(incTypeStr);
         const playbookHash = incident.evidence_hash || (incident.evidence_hash = this.computeSha256(`${incident.id}|${incident.time}|${playbookAttackerMac}|${playbookTargetBssid}|0|${incTypeStr}`));
+        const showPmfAdvisory = Boolean(
+            incident.type && (
+                incident.type.includes('Deauth') ||
+                incident.type.includes('evil-twin') ||
+                incident.type.includes('Rogue')
+            )
+        );
 
         if (typeof incident.remediation_steps === 'string') {
             try {
@@ -1128,13 +1234,13 @@ class IncidentManager {
             <div class="playbook-header">
                 <div>
                     <div class="playbook-title">${incident.type}</div>
-                    <div class="playbook-meta">ID: ${incident.id} | Window #${incident.start_window} | Confidence: ${(incident.confidence * 100).toFixed(0)}% <span class="status-pill status-pill-lg ${incident.status === 'OPEN' ? 'pill-high' : (incident.status === 'ACKNOWLEDGED' ? 'pill-active' : 'pill-resolved')}">${incident.status}</span></div>
+                    <div class="playbook-meta">ID: ${incident.id} | Window #${playbookWin} | Confidence: ${playbookConf} <span class="status-pill status-pill-lg ${incident.status === 'OPEN' ? 'pill-high' : (incident.status === 'ACKNOWLEDGED' ? 'pill-active' : 'pill-resolved')}">${incident.status}</span></div>
                 </div>
                 <div class="playbook-actions">
-                    <button class="btn btn-sm" id="btnExportPcap" title="Download binary Wireshark PCAP capture">&#x2913; Export Incident PCAP</button>
+                    <button class="btn btn-sm" id="btnExportPcap" title="${pcapTitle}">${pcapLabel}</button>
                     <button class="btn btn-sm" id="btnAckInc" ${incident.status !== 'OPEN' ? 'disabled' : ''}>Acknowledge</button>
                     <button class="btn btn-sm btn-danger" id="btnFpInc" ${incident.status === 'FALSE_POSITIVE' ? 'disabled' : ''}>Mark False Positive</button>
-                    <button class="btn btn-sm btn-primary" id="btnResolveInc" ${incident.status === 'RESOLVED' ? 'disabled' : ''}>Resolve</button>
+                    <button class="btn btn-sm btn-primary" id="btnResolveInc" ${incident.status === 'RESOLVED' ? 'disabled' : ''}>Resolved</button>
                 </div>
             </div>
 
@@ -1145,7 +1251,7 @@ class IncidentManager {
                 </div>
                 <div class="forensic-meta-item">
                     <strong>HARDWARE:</strong>
-                    <span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${incident.hardware_profile || '[ESP8266/ESP32 DEAUTHER]'}</span>
+                    <span class="badge-hardware font-mono"><span class="hardware-icon">&#x2699;</span> ${incident.hardware_profile || (isLiveMode ? 'N/A (Count-Only)' : '[ESP8266/ESP32 DEAUTHER]')}</span>
                 </div>
                 <div class="forensic-meta-item">
                     <strong>SIGNATURE:</strong>
@@ -1172,6 +1278,7 @@ class IncidentManager {
                 </div>
             ` : ''}
 
+            ${showPmfAdvisory ? `
             <div class="remediation-advisory-card">
                 <div class="remediation-advisory-header">
                     <span class="remediation-advisory-title">&#x26A0; 802.11w PMF &amp; 802.1X REMEDIATION ADVISORY</span>
@@ -1196,34 +1303,7 @@ class IncidentManager {
                     </label>
                 </div>
             </div>
-
-            <!-- Incident Forensic Verification Property Sheet -->
-            <div class="incident-property-sheet">
-                <div class="property-sheet-header">INCIDENT FORENSIC PROPERTY SHEET</div>
-                <table class="workstation-table property-sheet-table">
-                    <tbody>
-                        <tr>
-                            <td class="prop-label font-mono" style="width: 170px;">MITRE ATT&amp;CK:</td>
-                            <td class="prop-value">
-                                <div class="mitre-badge-container">
-                                    <span class="badge-mitre font-mono">[<span class="mitre-id">${playbookMitre.id}:</span> ${playbookMitre.name}]</span>
-                                    <div class="mitre-tactic font-mono">${playbookMitre.tactic}</div>
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="prop-label font-mono">SHA-256 EVIDENCE DIGEST:</td>
-                            <td class="prop-value">
-                                <div class="evidence-hash-box">
-                                    <span class="hash-label">DIGEST:</span>
-                                    <code class="mono-hash">${playbookHash}</code>
-                                    <button class="btn btn-sm btn-copy-hash" data-hash="${playbookHash}" title="Copy SHA-256 Checksum">COPY SHA-256</button>
-                                </div>
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
+            ` : ''}
 
             <div class="card-subtitle" style="margin-top: 10px; font-weight: 700; text-transform: uppercase; font-size: 10px;">Defensive Mitigation Playbook:</div>
             <div class="playbook-steps-list">${stepsHtml}</div>
@@ -1287,14 +1367,24 @@ class IncidentManager {
                 }
 
                 // Persist to backend
+                const apiBase = (window.nexusApp && typeof window.nexusApp.getApiBase === 'function')
+                    ? window.nexusApp.getApiBase()
+                    : (window.location.port === '8000' ? '' : 'http://127.0.0.1:8000');
+                const dbMode = (window.nexusApp && window.nexusApp.mode === 'SIMULATION') ? 'simulation' : 'live';
                 try {
-                    await fetch(`/api/incidents/${incident.id}/remediation`, {
+                    const resp = await fetch(`${apiBase}/api/incidents/${incident.id}/remediation?mode=${dbMode}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ completed_steps: incident.remediation_steps })
                     });
+                    if (!resp.ok) {
+                        console.error(`[NEXUS] Failed to persist remediation for ${incident.id}: HTTP ${resp.status}`);
+                        if (window.nexusApp && window.nexusApp.opsConsole) {
+                            window.nexusApp.opsConsole.showToast('PERSISTENCE ERROR', `Failed to save remediation checklist (HTTP ${resp.status}).`, 'danger');
+                        }
+                    }
                 } catch (e) {
-                    // Retain local memory state if offline
+                    console.error(`[NEXUS] Network error persisting remediation for ${incident.id}:`, e);
                 }
 
                 // Visual feedback: If all 4 steps completed, highlight the Resolve button
@@ -1360,8 +1450,8 @@ class IncidentManager {
 
         if (!bssid || !ssid) {
             const app = window.nexusApp;
-            if (app && app.wazuhConsole) {
-                app.wazuhConsole.showToast('INPUT REQUIRED', 'Please specify both BSSID and SSID.', 'warning');
+            if (app && app.opsConsole) {
+                app.opsConsole.showToast('INPUT REQUIRED', 'Please specify both BSSID and SSID.', 'warning');
             } else if (app && typeof app.showWin32Dialog === 'function') {
                 app.showWin32Dialog('Input Required', '<div style="font-size: 11px;">Please specify both BSSID and SSID.</div>');
             }
@@ -1397,8 +1487,8 @@ class IncidentManager {
             if (res.ok) {
                 const data = await res.json();
                 const msg = data.learned_count > 0 ? `Learned and allowlisted ${data.learned_count} access points.` : 'Zero new APs discovered in recent 200 windows.';
-                if (window.nexusApp && window.nexusApp.wazuhConsole) {
-                    window.nexusApp.wazuhConsole.showToast('AP ALLOWLIST', msg, data.learned_count > 0 ? 'success' : 'info');
+                if (window.nexusApp && window.nexusApp.opsConsole) {
+                    window.nexusApp.opsConsole.showToast('AP ALLOWLIST', msg, data.learned_count > 0 ? 'success' : 'info');
                 }
                 await this.fetchTrustedAps();
             }

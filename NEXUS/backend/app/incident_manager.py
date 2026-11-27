@@ -128,6 +128,30 @@ MITRE_ATTACK_MAP: Dict[str, Dict[str, str]] = {
         "technique_id": "T1036",
         "technique_name": "Masquerading",
         "reference": "https://attack.mitre.org/techniques/T1036/"
+    },
+    "MGMT_ANOMALY": {
+        "tactic": "Impact (TA0040)",
+        "technique_id": "T1499",
+        "technique_name": "Endpoint Denial of Service",
+        "reference": "https://attack.mitre.org/techniques/T1499/"
+    },
+    "BLE_ANOMALY": {
+        "tactic": "Resource Development (TA0042)",
+        "technique_id": "T1584",
+        "technique_name": "Compromise Infrastructure",
+        "reference": "https://attack.mitre.org/techniques/T1584/"
+    },
+    "NETWORK_DOS": {
+        "tactic": "Impact (TA0040)",
+        "technique_id": "T1498",
+        "technique_name": "Network Denial of Service",
+        "reference": "https://attack.mitre.org/techniques/T1498/"
+    },
+    "HARDWARE_ADDITION": {
+        "tactic": "Initial Access (TA0001)",
+        "technique_id": "T1200",
+        "technique_name": "Hardware Additions",
+        "reference": "https://attack.mitre.org/techniques/T1200/"
     }
 }
 
@@ -135,20 +159,24 @@ MITRE_ATTACK_MAP: Dict[str, Dict[str, str]] = {
 def map_incident_to_mitre(event_type: str) -> Dict[str, str]:
     """Maps wireless anomaly event type to standardized MITRE ATT&CK technique."""
     norm = str(event_type).upper().strip()
-    if "DEAUTH" in norm:
+    if "DEAUTH" in norm or "DISASSOC" in norm:
         return MITRE_ATTACK_MAP["DEAUTH_FLOOD"]
     elif "ROGUE" in norm or "TWIN" in norm:
         return MITRE_ATTACK_MAP["ROGUE_AP"]
+    elif "MGMT" in norm or "MANAGEMENT" in norm:
+        return MITRE_ATTACK_MAP["MGMT_ANOMALY"]
+    elif "BLE" in norm or "BLUETOOTH" in norm:
+        return MITRE_ATTACK_MAP["BLE_ANOMALY"]
     elif "JAM" in norm or "CARRIER" in norm:
         return MITRE_ATTACK_MAP["RF_JAMMING"]
     elif "SPOOF" in norm or "RANDOM" in norm:
         return MITRE_ATTACK_MAP["MAC_SPOOFING"]
-    return {
-        "tactic": "Initial Access (TA0001)",
-        "technique_id": "T1200",
-        "technique_name": "Hardware Additions / Wireless Interception",
-        "reference": "https://attack.mitre.org/techniques/T1200/"
-    }
+    elif "HARDWARE" in norm:
+        return MITRE_ATTACK_MAP["HARDWARE_ADDITION"]
+    return MITRE_ATTACK_MAP["NETWORK_DOS"]
+
+
+map_event_to_mitre = map_incident_to_mitre
 
 
 def compute_evidence_hash(record: Dict[str, Any]) -> str:
@@ -327,17 +355,19 @@ class IncidentManager:
                 or generate_remediation_advisory(event_type, deauth_reason, bool(deauth_reason in (2, 6, 7)))
             )
 
-            if not alert_record.get("mitre_technique_id"):
-                mitre_info = map_incident_to_mitre(event_type)
-                alert_record["mitre_technique_id"] = mitre_info["technique_id"]
-                alert_record["mitre_technique_name"] = mitre_info["technique_name"]
-                alert_record["mitre_tactic"] = mitre_info["tactic"]
+            default_mitre = map_incident_to_mitre(event_type)
+            if not alert_record.get("mitre_technique_id") or (
+                alert_record.get("mitre_technique_id") == "T1200" and "HARDWARE" not in event_type.upper()
+            ):
+                alert_record["mitre_technique_id"] = default_mitre["technique_id"]
+                alert_record["mitre_technique_name"] = default_mitre["technique_name"]
+                alert_record["mitre_tactic"] = default_mitre["tactic"]
             if not alert_record.get("evidence_hash"):
                 alert_record["evidence_hash"] = compute_evidence_hash(alert_record)
 
-            mitre_technique_id = alert_record.get("mitre_technique_id", "T1200")
-            mitre_technique_name = alert_record.get("mitre_technique_name", "")
-            mitre_tactic = alert_record.get("mitre_tactic", "")
+            mitre_technique_id = alert_record.get("mitre_technique_id") or default_mitre["technique_id"]
+            mitre_technique_name = alert_record.get("mitre_technique_name") or default_mitre["technique_name"]
+            mitre_tactic = alert_record.get("mitre_tactic") or default_mitre["tactic"]
             evidence_hash = alert_record.get("evidence_hash", compute_evidence_hash(alert_record))
 
             # Look for an existing open incident in active cache within 60-second aggregation window
@@ -378,11 +408,12 @@ class IncidentManager:
                     inc_cache["proximity_zone"] = proximity_zone
                 if not inc_cache.get("evidence_hash"):
                     inc_cache["evidence_hash"] = evidence_hash
-                if not inc_cache.get("mitre_technique_id") or inc_cache.get("mitre_technique_id") == "T1200":
-                    if mitre_technique_id != "T1200":
-                        inc_cache["mitre_technique_id"] = mitre_technique_id
-                        inc_cache["mitre_technique_name"] = mitre_technique_name
-                        inc_cache["mitre_tactic"] = mitre_tactic
+                if not inc_cache.get("mitre_technique_id") or (
+                    inc_cache.get("mitre_technique_id") == "T1200" and "HARDWARE" not in str(inc_cache.get("event_type", "")).upper()
+                ):
+                    inc_cache["mitre_technique_id"] = mitre_technique_id
+                    inc_cache["mitre_technique_name"] = mitre_technique_name
+                    inc_cache["mitre_tactic"] = mitre_tactic
 
                 summary_detail = (
                     f"Correlated alert {event_id} at window {window_id}: "
@@ -405,9 +436,9 @@ class IncidentManager:
                         "tool_signature": inc_cache.get("tool_signature", "UNKNOWN"),
                         "deauth_reason": inc_cache.get("deauth_reason", 0),
                         "proximity_zone": inc_cache.get("proximity_zone", "NONE"),
-                        "mitre_technique_id": inc_cache.get("mitre_technique_id", "T1200"),
-                        "mitre_technique_name": inc_cache.get("mitre_technique_name", ""),
-                        "mitre_tactic": inc_cache.get("mitre_tactic", ""),
+                        "mitre_technique_id": inc_cache.get("mitre_technique_id") or default_mitre["technique_id"],
+                        "mitre_technique_name": inc_cache.get("mitre_technique_name") or default_mitre["technique_name"],
+                        "mitre_tactic": inc_cache.get("mitre_tactic") or default_mitre["tactic"],
                         "evidence_hash": inc_cache.get("evidence_hash", "")
                     },
                     conn=conn
@@ -423,9 +454,9 @@ class IncidentManager:
                     "tool_signature": inc_cache.get("tool_signature", "UNKNOWN"),
                     "deauth_reason": inc_cache.get("deauth_reason", 0),
                     "proximity_zone": inc_cache.get("proximity_zone", "NONE"),
-                    "mitre_technique_id": inc_cache.get("mitre_technique_id", "T1200"),
-                    "mitre_technique_name": inc_cache.get("mitre_technique_name", ""),
-                    "mitre_tactic": inc_cache.get("mitre_tactic", ""),
+                    "mitre_technique_id": inc_cache.get("mitre_technique_id") or default_mitre["technique_id"],
+                    "mitre_technique_name": inc_cache.get("mitre_technique_name") or default_mitre["technique_name"],
+                    "mitre_tactic": inc_cache.get("mitre_tactic") or default_mitre["tactic"],
                     "evidence_hash": inc_cache.get("evidence_hash", "")
                 }
             else:
@@ -441,13 +472,17 @@ class IncidentManager:
 
                 incident_payload = {
                     "incident_id": new_incident_id,
+                    "start_window": window_id,
+                    "last_window": window_id,
                     "start_epoch_ms": epoch_ms,
                     "end_epoch_ms": epoch_ms,
                     "event_type": event_type,
                     "severity": severity,
+                    "confidence": float(alert_record.get("confidence", 0.5)),
                     "status": "OPEN",
                     "event_count": 1,
                     "associated_event_ids_json": [event_id],
+                    "signals_involved_json": evidence if evidence else [event_id],
                     "target_bssid": target_bssid or target_mac,
                     "summary": summary_text,
                     "analyst_notes": f"Hardware: {hardware_profile} | Remediation: {remediation_advisory}",
@@ -459,10 +494,10 @@ class IncidentManager:
                     "proximity_zone": proximity_zone,
                     "hardware_profile": hardware_profile,
                     "remediation_advisory": remediation_advisory,
-                    "mitre_technique_id": alert_record.get("mitre_technique_id", "T1200"),
-                    "mitre_technique_name": alert_record.get("mitre_technique_name", ""),
-                    "mitre_tactic": alert_record.get("mitre_tactic", ""),
-                    "evidence_hash": alert_record.get("evidence_hash", compute_evidence_hash(alert_record))
+                    "mitre_technique_id": mitre_technique_id,
+                    "mitre_technique_name": mitre_technique_name,
+                    "mitre_tactic": mitre_tactic,
+                    "evidence_hash": evidence_hash
                 }
 
                 created_id = create_incident(incident_payload, conn=conn)

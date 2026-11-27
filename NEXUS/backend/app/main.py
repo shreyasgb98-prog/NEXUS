@@ -58,6 +58,7 @@ from .database import (
     create_incident,
     update_incident_status,
     fetch_active_incidents,
+    fetch_all_incidents,
     fetch_incidents,
     fetch_incident_with_timeline,
     fetch_false_positive_stats,
@@ -907,7 +908,7 @@ def get_hardware_whitelist():
     return entries
 
 @app.post("/api/telemetry/reset", dependencies=[Depends(verify_api_key)])
-def reset_telemetry_state():
+def reset_telemetry_state(mode: Optional[str] = None):
     global cumulative_nfc_reads, active_attack_labelling
     baseline_engine.reset()
     baseline_engine.alpha = EWMA_ALPHA
@@ -925,11 +926,30 @@ def reset_telemetry_state():
     cumulative_nfc_reads = 0
     active_attack_labelling = False
 
-    conn = get_connection()
-    try:
-        reset_telemetry_database(conn)
-    finally:
-        conn.close()
+    resolved = resolve_db_mode(mode_param=mode) if mode is not None else None
+    if resolved == "sim":
+        conn = get_connection(db_mode="simulation")
+        try:
+            purge_simulation_database(conn)
+        finally:
+            conn.close()
+    elif resolved == "live":
+        conn = get_connection(db_mode="live")
+        try:
+            reset_telemetry_database(conn)
+        finally:
+            conn.close()
+    else:
+        live_conn = get_connection(db_mode="live")
+        try:
+            reset_telemetry_database(live_conn)
+        finally:
+            live_conn.close()
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            purge_simulation_database(sim_conn)
+        finally:
+            sim_conn.close()
 
     return {"status": "database_reset_ok"}
 
@@ -1133,18 +1153,19 @@ def add_or_update_trusted_ap(payload: TrustedApPayload):
 def get_incidents(mode: Optional[str] = "live"):
     conn = get_connection(db_mode=resolve_db_mode(mode_param=mode))
     try:
-        active = fetch_active_incidents(conn)
+        all_incidents = fetch_all_incidents(conn)
         stats = fetch_false_positive_stats(conn)
         return {
-            "active_incidents": active,
+            "active_incidents": all_incidents,
             "false_positive_stats": stats
         }
     finally:
         conn.close()
 
 @app.post("/api/incidents/{incident_id}/status")
-def change_incident_status(incident_id: str, payload: IncidentStatusPayload):
-    conn = get_connection()
+def change_incident_status(incident_id: str, payload: IncidentStatusPayload, mode: Optional[str] = None):
+    target_mode = resolve_db_mode(mode_param=mode)
+    conn = get_connection(db_mode=target_mode)
     try:
         success = incident_manager.update_status(
             incident_id=incident_id,
@@ -1155,30 +1176,64 @@ def change_incident_status(incident_id: str, payload: IncidentStatusPayload):
         )
     finally:
         conn.close()
+
+    if not success and mode is None:
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            success = incident_manager.update_status(
+                incident_id=incident_id,
+                new_status=payload.status,
+                note=payload.note or "",
+                baseline_engine=baseline_engine,
+                conn=sim_conn
+            )
+        finally:
+            sim_conn.close()
+
     if not success:
         raise HTTPException(status_code=404, detail="Incident not found or update failed.")
     return {"incident_id": incident_id, "status": payload.status.upper(), "updated": True}
 
 @app.get("/api/incidents/{incident_id}")
-def get_incident_by_id_endpoint(incident_id: str):
-    conn = get_connection()
+def get_incident_by_id_endpoint(incident_id: str, mode: Optional[str] = None):
+    target_mode = resolve_db_mode(mode_param=mode)
+    conn = get_connection(db_mode=target_mode)
     try:
         inc = fetch_incident_by_id(incident_id, conn=conn)
         if not inc:
             inc = fetch_incident_with_timeline(incident_id, conn=conn)
     finally:
         conn.close()
+
+    if not inc and mode is None:
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            inc = fetch_incident_by_id(incident_id, conn=sim_conn)
+            if not inc:
+                inc = fetch_incident_with_timeline(incident_id, conn=sim_conn)
+        finally:
+            sim_conn.close()
+
     if not inc:
         raise HTTPException(status_code=404, detail="Incident not found.")
     return inc
 
 @app.post("/api/incidents/{incident_id}/remediation")
-def update_incident_remediation_endpoint(incident_id: str, payload: RemediationUpdatePayload):
-    conn = get_connection()
+def update_incident_remediation_endpoint(incident_id: str, payload: RemediationUpdatePayload, mode: Optional[str] = None):
+    target_mode = resolve_db_mode(mode_param=mode)
+    conn = get_connection(db_mode=target_mode)
     try:
         success = update_incident_remediation(conn, incident_id, payload.completed_steps)
     finally:
         conn.close()
+
+    if not success and mode is None:
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            success = update_incident_remediation(sim_conn, incident_id, payload.completed_steps)
+        finally:
+            sim_conn.close()
+
     if not success:
         raise HTTPException(status_code=404, detail="Incident not found or update failed.")
     return {
@@ -1187,71 +1242,93 @@ def update_incident_remediation_endpoint(incident_id: str, payload: RemediationU
         "completed_steps": payload.completed_steps
     }
 
-@app.post("/api/incidents/batch-status")
-def batch_incident_status_endpoint(payload: BatchStatusUpdate):
-    conn = get_connection()
-    now_ms = int(time.time() * 1000)
-    try:
-        if payload.incident_ids is not None:
-            raw_status = (payload.status or "").strip().upper()
-            if raw_status not in ["OPEN", "ACKNOWLEDGED", "RESOLVED"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Status must be one of ['OPEN', 'ACKNOWLEDGED', 'RESOLVED']"
-                )
-            if not payload.incident_ids:
-                return {
-                    "updated_count": 0,
-                    "status": "success",
-                    "incident_ids": []
-                }
-            placeholders = ",".join("?" for _ in payload.incident_ids)
-            query = (
-                f"UPDATE incidents SET status = ?, updated_at = ? "
-                f"WHERE id IN ({placeholders}) OR rowid IN ({placeholders}) OR incident_id IN ({placeholders});"
-            )
-            params = [raw_status, now_ms] + list(payload.incident_ids) + list(payload.incident_ids) + list(payload.incident_ids)
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            count = cursor.rowcount
-            conn.commit()
-            return {
-                "updated_count": count,
-                "status": "success",
-                "incident_ids": payload.incident_ids
-            }
-        elif payload.from_status and payload.to_status:
-            raw_to_status = payload.to_status.strip().upper()
-            count = batch_update_incident_status(
-                payload.from_status,
-                raw_to_status,
-                payload.note or "",
-                conn
-            )
-            return {
-                "updated_count": count,
-                "new_status": raw_to_status,
-                "status": "success"
-            }
-        else:
+def _apply_batch_status(conn, payload: BatchStatusUpdate, now_ms: int) -> Dict[str, Any]:
+    if payload.incident_ids is not None:
+        raw_status = (payload.status or "").strip().upper()
+        if raw_status not in ["OPEN", "ACKNOWLEDGED", "RESOLVED"]:
             raise HTTPException(
                 status_code=400,
-                detail="Either incident_ids and status, or from_status and to_status must be provided."
+                detail="Status must be one of ['OPEN', 'ACKNOWLEDGED', 'RESOLVED']"
             )
+        if not payload.incident_ids:
+            return {
+                "updated_count": 0,
+                "status": "success",
+                "incident_ids": []
+            }
+        placeholders = ",".join("?" for _ in payload.incident_ids)
+        query = (
+            f"UPDATE incidents SET status = ?, updated_at = ? "
+            f"WHERE id IN ({placeholders}) OR rowid IN ({placeholders}) OR incident_id IN ({placeholders});"
+        )
+        params = [raw_status, now_ms] + list(payload.incident_ids) + list(payload.incident_ids) + list(payload.incident_ids)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        count = cursor.rowcount
+        conn.commit()
+        return {
+            "updated_count": count,
+            "status": "success",
+            "incident_ids": payload.incident_ids
+        }
+    elif payload.from_status and payload.to_status:
+        raw_to_status = payload.to_status.strip().upper()
+        count = batch_update_incident_status(
+            payload.from_status,
+            raw_to_status,
+            payload.note or "",
+            conn
+        )
+        return {
+            "updated_count": count,
+            "new_status": raw_to_status,
+            "status": "success"
+        }
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either incident_ids and status, or from_status and to_status must be provided."
+        )
+
+@app.post("/api/incidents/batch-status")
+def batch_incident_status_endpoint(payload: BatchStatusUpdate, mode: Optional[str] = None):
+    target_mode = resolve_db_mode(mode_param=mode)
+    now_ms = int(time.time() * 1000)
+    conn = get_connection(db_mode=target_mode)
+    try:
+        res = _apply_batch_status(conn, payload, now_ms)
     finally:
         conn.close()
 
-@app.post("/api/incidents/sync", dependencies=[Depends(verify_api_key)])
-def sync_incident_endpoint(payload: IncidentSyncPayload):
-    alert = payload.alert or {}
-    incident = payload.incident or {}
+    if res.get("updated_count", 0) == 0 and mode is None:
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            res = _apply_batch_status(sim_conn, payload, now_ms)
+        finally:
+            sim_conn.close()
 
-    conn = get_connection()
+    return res
+
+@app.post("/api/incidents/sync", dependencies=[Depends(verify_api_key)])
+def sync_incident_endpoint(payload: IncidentSyncPayload, mode: Optional[str] = None):
+    alert = dict(payload.alert or {})
+    incident = dict(payload.incident or {})
+    data_source = alert.get("data_source") or incident.get("data_source")
+
+    conn = get_connection(db_mode=resolve_db_mode(data_source=data_source, mode_param=mode))
     try:
         if payload.alert:
-            insert_alert_event(payload.alert, conn=conn)
+            insert_alert_event(alert, conn=conn)
         if payload.incident:
-            insert_incident_record(payload.incident, conn=conn)
+            if not incident.get("window_id") and not incident.get("start_window") and alert.get("window_id"):
+                incident["window_id"] = alert.get("window_id")
+            if incident.get("channel") is None and alert.get("channel") is not None:
+                incident["channel"] = alert.get("channel")
+            if incident.get("confidence") is None and alert.get("confidence") is not None:
+                incident["confidence"] = alert.get("confidence")
+            if not incident.get("evidence") and alert.get("evidence"):
+                incident["evidence"] = alert.get("evidence")
+            insert_incident_record(incident, conn=conn)
     finally:
         conn.close()
 
@@ -1394,12 +1471,20 @@ def generate_incident_pcap(incident_dict: Dict[str, Any]) -> bytes:
     return global_hdr + b"".join(packet_data_blocks)
 
 @app.get("/api/incidents/{incident_id}/pcap")
-def download_incident_pcap(incident_id: str):
-    conn = get_connection()
+def download_incident_pcap(incident_id: str, mode: Optional[str] = None):
+    target_mode = resolve_db_mode(mode_param=mode)
+    conn = get_connection(db_mode=target_mode)
     try:
         inc = fetch_incident_with_timeline(incident_id, conn=conn)
     finally:
         conn.close()
+
+    if (not inc or not inc.get("incident_id")) and mode is None:
+        sim_conn = get_connection(db_mode="simulation")
+        try:
+            inc = fetch_incident_with_timeline(incident_id, conn=sim_conn)
+        finally:
+            sim_conn.close()
 
     if not inc or not inc.get("incident_id"):
         raise HTTPException(status_code=404, detail="Incident not found.")
@@ -1512,8 +1597,8 @@ def get_csv_replay_status():
     return replay_engine.get_status()
 
 @app.get("/api/evaluation/threshold-sweep")
-def get_evaluation_threshold_sweep(data_source: Optional[str] = None):
-    conn = get_connection()
+def get_evaluation_threshold_sweep(mode: Optional[str] = None, data_source: Optional[str] = None):
+    conn = get_connection(db_mode=resolve_db_mode(data_source=data_source, mode_param=mode))
     try:
         windows = fetch_all_telemetry(conn, data_source=data_source)
     finally:
@@ -1521,8 +1606,8 @@ def get_evaluation_threshold_sweep(data_source: Optional[str] = None):
     return compute_threshold_sweep(windows, warmup_windows=WARMUP_WINDOWS)
 
 @app.get("/api/evaluation/ablation")
-def get_evaluation_ablation(data_source: Optional[str] = None):
-    conn = get_connection()
+def get_evaluation_ablation(mode: Optional[str] = None, data_source: Optional[str] = None):
+    conn = get_connection(db_mode=resolve_db_mode(data_source=data_source, mode_param=mode))
     try:
         windows = fetch_all_telemetry(conn, data_source=data_source)
     finally:

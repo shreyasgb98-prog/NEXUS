@@ -1,7 +1,7 @@
 // NEXUS AI: Modern Dark Analytics Console Coordinator (SnowUI Style)
 // Enforces adaptive EWMA baselining, z-score anomaly detection, multi-signal correlation,
 // operational status KPI metrics, stacked 4-signal visualization, incident triage playbooks,
-// Lab Mode gating, CSV telemetry replay, and Wazuh-style operations console synchronization.
+// Lab Mode gating, CSV telemetry replay, and Operations console synchronization.
 
 class WorkstationAudioRadar {
   constructor() {
@@ -83,6 +83,7 @@ class NexusApp {
 
         // Pipeline state counters
         this.windowCount = 0;
+        this.sessionWindowCount = 0;
         this.nfcCount = 0;
         this.lastEventWindow = -999;
         this.eventCounter = 0;
@@ -103,10 +104,14 @@ class NexusApp {
         this.primaryChannel = 6;
         this.scanPlanDeployed = false;
 
-        // Onboard NVS Flash AP Whitelist
-        this.nvsWhitelist = [
-            { ssid: 'Campus-Corp-Secure', bssid: '00:14:2D:E1:92:40' }
-        ];
+        // Onboard NVS Flash AP Whitelist (seed demo entry strictly in Simulation mode)
+        const initMode = localStorage.getItem('nexus_active_mode') || 'SIMULATION';
+        this.nvsWhitelist = initMode === 'SIMULATION'
+            ? [{ ssid: 'Campus-Corp-Secure', bssid: '00:14:2D:E1:92:40' }]
+            : [];
+
+        // Web Serial MicroSD download transfer state
+        this.sdTransfer = { active: false, file: null, buffer: '' };
 
         // Replay Mode State
         this.replayWindows = [];
@@ -128,7 +133,7 @@ class NexusApp {
         try { this.chart = new TelemetryChart('telemetryChart'); } catch (e) { this.chart = null; }
         try { this.incidentManager = new IncidentManager(); } catch (e) { this.incidentManager = null; }
         try { this.assistant = new NexusAssistant(); } catch (e) { this.assistant = null; }
-        try { this.wazuhConsole = new WazuhConsoleManager(); } catch (e) { this.wazuhConsole = null; }
+        try { this.opsConsole = new OpsConsoleManager(); } catch (e) { this.opsConsole = null; }
 
         try {
             this.tableManager = new TelemetryTableManager({
@@ -147,6 +152,7 @@ class NexusApp {
         try {
             this.serialReceiver = new WebSerialReceiver({
                 onWindow: (payload) => this.handleTelemetryWindow(payload, 'live (serial)'),
+                onControl: (payload) => this.handleSerialControl(payload),
                 onStateChange: (state) => this.handleSerialStateChange(state),
                 onError: (errInfo) => this.handleSerialError(errInfo)
             });
@@ -159,6 +165,23 @@ class NexusApp {
 
     getApiBase() {
         return window.location.port === '8000' ? '' : 'http://127.0.0.1:8000';
+    }
+
+    applyTheme(theme) {
+        const normalized = theme === 'light' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', normalized);
+        localStorage.setItem('nexus_theme', normalized);
+        const btn = document.getElementById('btnToggleTheme');
+        if (btn) {
+            btn.textContent = normalized === 'light' ? 'Theme: Light' : 'Theme: Dark';
+        }
+        if (this.chart) this.chart.render();
+        this.renderThresholdSweepChart();
+    }
+
+    toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') || localStorage.getItem('nexus_theme') || 'dark';
+        this.applyTheme(current === 'light' ? 'dark' : 'light');
     }
 
     initDOM() {
@@ -183,10 +206,12 @@ class NexusApp {
                 this.renderThresholdSweepChart();
                 if (this.evaluationManager) this.evaluationManager.loadAblationTable();
             } else if (tabId === 'rf-matrix') {
-                if (this.chart) {
-                    this.chart.resize();
-                    this.chart.render();
-                }
+                requestAnimationFrame(() => {
+                    if (this.chart) {
+                        this.chart.resize();
+                        this.chart.render();
+                    }
+                });
             } else if (tabId === 'incidents') {
                 const incPane = document.getElementById('incidentsTableContainer');
                 if (incPane) incPane.style.display = 'flex';
@@ -277,20 +302,22 @@ class NexusApp {
         bindMenu('menuViewSettings', () => this.switchTab('settings'));
         bindMenu('menuToggleAssistant', () => this.assistant.toggleDrawer());
         bindMenu('menuToggleAudio', () => this.incidentManager.toggleAudio());
+        bindMenu('menuToggleTheme', () => this.toggleTheme());
 
         // Triage Menu
         bindMenu('menuAcknowledgeAll', async () => {
             if (!this.incidentManager) return;
             const ids = this.incidentManager.incidents.filter(i => i.status === 'OPEN').map(i => i.id);
             if (ids.length === 0) {
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('TRIAGE', 'No open incidents to acknowledge.', 'info');
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('TRIAGE', 'No open incidents to acknowledge.', 'info');
                 }
                 return;
             }
 
             try {
-                const resp = await fetch('/api/incidents/batch-status', {
+                const dbMode = this.mode === 'SIMULATION' ? 'simulation' : 'live';
+                const resp = await fetch(`${this.getApiBase()}/api/incidents/batch-status?mode=${dbMode}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -312,23 +339,23 @@ class NexusApp {
                     if (this.incidentManager.selectedIncident && ids.includes(this.incidentManager.selectedIncident.id)) {
                         this.incidentManager.renderDefensivePlaybook(this.incidentManager.selectedIncident);
                     }
-                    if (this.wazuhConsole) {
-                        this.wazuhConsole.showToast('TRIAGE', `Acknowledged ${res.updated_count !== undefined ? res.updated_count : ids.length} incidents in database.`, 'success');
+                    if (this.opsConsole) {
+                        this.opsConsole.showToast('TRIAGE', `Acknowledged ${res.updated_count !== undefined ? res.updated_count : ids.length} incidents in database.`, 'success');
                     }
                 } else {
-                    if (this.wazuhConsole) {
-                        this.wazuhConsole.showToast('TRIAGE ERROR', `Batch acknowledgment failed with status ${resp.status}.`, 'danger');
+                    if (this.opsConsole) {
+                        this.opsConsole.showToast('TRIAGE ERROR', `Batch acknowledgment failed with status ${resp.status}.`, 'danger');
                     }
                 }
             } catch (err) {
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('TRIAGE ERROR', `Network communication error: ${err.message}`, 'danger');
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('TRIAGE ERROR', `Network communication error: ${err.message}`, 'danger');
                 }
             }
         });
         bindMenu('menuLearnEnv', () => this.incidentManager.learnEnvironment());
         bindMenu('menuExportReport', () => {
-            if (this.wazuhConsole) this.wazuhConsole.exportComplianceReport();
+            if (this.opsConsole) this.opsConsole.exportComplianceReport();
         });
 
         // Benchmark Menu
@@ -339,7 +366,7 @@ class NexusApp {
         bindMenu('menuToggleLab', () => this.toggleLabMode());
         bindMenu('menuRunDemoScenario', () => {
             this.switchTab('rf-matrix');
-            if (this.wazuhConsole) this.wazuhConsole.runDemoScenario();
+            if (this.opsConsole) this.opsConsole.runDemoScenario();
         });
 
         // Help Menu
@@ -390,9 +417,9 @@ class NexusApp {
             if (mitreContainer) {
                 mitreContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
-            if (this.wazuhConsole) {
-                this.wazuhConsole.highlightMitreTechniques();
-                this.wazuhConsole.showToast('MITRE ATT&CK', 'Active wireless adversary techniques highlighted in SOC matrix.', 'info');
+            if (this.opsConsole) {
+                this.opsConsole.highlightMitreTechniques();
+                this.opsConsole.showToast('MITRE ATT&CK', 'Active wireless adversary techniques highlighted in SOC matrix.', 'info');
             }
         });
 
@@ -415,7 +442,7 @@ class NexusApp {
 
         // Keyboard Shortcuts (Workstation Hotkeys)
         window.addEventListener('keydown', (e) => {
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
 
             if (e.key === 'F1') { e.preventDefault(); this.switchTab('rf-matrix'); }
             else if (e.key === 'F2') { e.preventDefault(); this.switchTab('incidents'); }
@@ -425,6 +452,11 @@ class NexusApp {
             else if (e.ctrlKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); this.assistant.toggleDrawer(); }
             else if (e.ctrlKey && (e.key === 'e' || e.key === 'E')) { e.preventDefault(); window.location.href = this.getActiveExportUrls().csvUrl; }
             else if (e.ctrlKey && (e.key === 'j' || e.key === 'J')) { e.preventDefault(); window.location.href = this.getActiveExportUrls().jsonUrl; }
+            else if (e.key === 'Delete') {
+                e.preventDefault();
+                const modalReset = document.getElementById('resetConfirmModal');
+                if (modalReset) modalReset.style.display = 'flex';
+            }
             else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); this.toggleRun(); }
         });
 
@@ -477,6 +509,14 @@ class NexusApp {
             btnToggleLab.onclick = () => this.toggleLabMode();
         }
 
+        // Win2K Light / Dark Theme Switcher
+        const savedTheme = localStorage.getItem('nexus_theme') || 'dark';
+        this.applyTheme(savedTheme);
+        const btnToggleTheme = document.getElementById('btnToggleTheme');
+        if (btnToggleTheme) {
+            btnToggleTheme.onclick = () => this.toggleTheme();
+        }
+
         // Navigation and primary controls
         document.getElementById('btnStartPause').onclick = () => this.toggleRun();
         document.getElementById('btnConnectSerial').onclick = () => this.connectSerial();
@@ -497,19 +537,28 @@ class NexusApp {
             btnConfirmReset.onclick = async () => {
                 modalReset.style.display = 'none';
                 this.reset();
+                const dbMode = this.mode === 'SIMULATION' ? 'simulation' : 'live';
+                let resetOk = false;
                 try {
-                    await fetch('http://127.0.0.1:8000/api/telemetry/reset', {
+                    const resp = await fetch(`${this.getApiBase()}/api/telemetry/reset?mode=${dbMode}`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                             'X-Nexus-Key': 'nexus-local-dev-token'
                         }
                     });
+                    resetOk = resp.ok;
                 } catch (err) {
                     // Non-blocking: fail quietly if backend offline
                 }
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('DATABASE PURGED', 'Historical telemetry, baselines, and alerts have been purged from local state and backend SQLite.', 'warning', 5000);
+                if (dbMode === 'live' && this.serialReceiver && this.serialReceiver.port && this.serialReceiver.sendSerialCommand) {
+                    await this.serialReceiver.sendSerialCommand({ cmd: 'win_reset' });
+                }
+                if (this.opsConsole) {
+                    const msg = resetOk
+                        ? `Historical telemetry, baselines, and alerts purged from local state and ${dbMode} SQLite.`
+                        : 'Local state purged (backend SQLite reset unreachable or failed).';
+                    this.opsConsole.showToast('DATABASE PURGED', msg, 'warning', 5000);
                 }
             };
         }
@@ -533,8 +582,8 @@ class NexusApp {
         if (btnRunSweep) {
             btnRunSweep.onclick = () => {
                 this.renderThresholdSweepChart();
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('SWEEP COMPUTED', 'Empirical threshold sweep completed across Z = 2.0σ to 5.0σ. Optimal F1 = 0.96 at Z = 3.5σ.', 'success', 4000);
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('SWEEP COMPUTED', 'Empirical threshold sweep completed across Z = 2.0σ to 5.0σ. Optimal F1 = 0.96 at Z = 3.5σ.', 'success', 4000);
                 }
             };
         }
@@ -598,6 +647,41 @@ class NexusApp {
         }
 
         // Onboard NVS Flash AP Whitelist Controls
+        const btnScanAps = document.getElementById('btnScanDiscoveredAps');
+        const selectDiscoveredAp = document.getElementById('selectDiscoveredAp');
+        if (btnScanAps) {
+            btnScanAps.onclick = () => this.scanDiscoveredAps();
+        }
+        if (selectDiscoveredAp) {
+            selectDiscoveredAp.onchange = () => {
+                const opt = selectDiscoveredAp.options[selectDiscoveredAp.selectedIndex];
+                if (!opt || !opt.value) return;
+                const ssidInput = document.getElementById('inputWhitelistSsid');
+                const bssidInput = document.getElementById('inputWhitelistBssid');
+                if (ssidInput) ssidInput.value = opt.dataset.ssid || '';
+                if (bssidInput) bssidInput.value = opt.value;
+            };
+        }
+
+        // Tab 3 Trusted AP Allowlist Live Serial Scan Controls
+        const btnScanTrustedAps = document.getElementById('btnScanTrustedAps');
+        const selectTrustedDiscoveredAp = document.getElementById('selectTrustedDiscoveredAp');
+        if (btnScanTrustedAps) {
+            btnScanTrustedAps.onclick = () => this.scanDiscoveredAps();
+        }
+        if (selectTrustedDiscoveredAp) {
+            selectTrustedDiscoveredAp.onchange = () => {
+                const opt = selectTrustedDiscoveredAp.options[selectTrustedDiscoveredAp.selectedIndex];
+                if (!opt || !opt.value) return;
+                const bssidInput = document.getElementById('inputNewBssid');
+                const ssidInput = document.getElementById('inputNewSsid');
+                const chInput = document.getElementById('inputNewChannel');
+                if (bssidInput) bssidInput.value = opt.value;
+                if (ssidInput) ssidInput.value = opt.dataset.ssid || '';
+                if (chInput) chInput.value = opt.dataset.ch || '';
+            };
+        }
+
         const btnCommitWl = document.getElementById('btnCommitWhitelist');
         const btnPurgeWl = document.getElementById('btnPurgeWhitelist');
         if (btnCommitWl) {
@@ -608,6 +692,16 @@ class NexusApp {
         }
         this.renderNvsWhitelistTable();
         this.updateNvsWhitelistStatus();
+
+        // ESP32 MicroSD Black-Box Log Controls
+        const btnSdCheck = document.getElementById('btnSdCheck');
+        const btnSdJsonl = document.getElementById('btnSdDownloadJsonl');
+        const btnSdCsv = document.getElementById('btnSdDownloadCsv');
+        const btnSdDelete = document.getElementById('btnSdDelete');
+        if (btnSdCheck) btnSdCheck.onclick = () => this.checkSdStatus();
+        if (btnSdJsonl) btnSdJsonl.onclick = () => this.startSdDownload('jsonl');
+        if (btnSdCsv) btnSdCsv.onclick = () => this.startSdDownload('csv');
+        if (btnSdDelete) btnSdDelete.onclick = () => this.confirmDeleteSdLogs();
         this.initMitreCardDrilldown();
 
         // Synthetic Workstation Audio Radar Toggle (Status Bar)
@@ -616,8 +710,8 @@ class NexusApp {
             btnAudioToggle.onclick = () => {
                 const current = window.audioRadar ? window.audioRadar.enabled : false;
                 setGlobalAudioState(!current);
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('AUDIO RADAR', `Threat Chirp Synthesizer: ${!current ? 'ACTIVE' : 'MUTED'}`, 'info');
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('AUDIO RADAR', `Threat Chirp Synthesizer: ${!current ? 'ACTIVE' : 'MUTED'}`, 'info');
                 }
             };
         }
@@ -640,8 +734,8 @@ class NexusApp {
                 this.windowCount = 0;
                 this.hydrateFromBackend().then(() => {
                     if (this.chart) this.chart.render();
-                    if (this.wazuhConsole) {
-                        this.wazuhConsole.showToast('HYDRATION', `Reloaded ${this.allWindows.length} windows from backend storage.`, 'success');
+                    if (this.opsConsole) {
+                        this.opsConsole.showToast('HYDRATION', `Reloaded ${this.allWindows.length} windows from backend storage.`, 'success');
                     }
                 });
             };
@@ -675,7 +769,7 @@ class NexusApp {
         // Initialize in clean non-Lab mode and restore persisted mode
         this.applyLabModeVisibility();
         const savedMode = localStorage.getItem('nexus_active_mode') || 'SIMULATION';
-        this.setMode(savedMode);
+        this.setMode(savedMode, true);
 
         // Startup hydration from backend SQLite before starting live simulation ticks
         this.hydrateFromBackend().then(() => {
@@ -691,8 +785,8 @@ class NexusApp {
                     this.updateOperationalKpis();
                     this.updateNodeStatusDisplay();
                     this.updateNodeHealthCard();
-                    if (this.wazuhConsole) {
-                        this.wazuhConsole.showToast('SERIAL LINK', 'Reconnected to authorized ESP32 hardware node at 115200 baud.', 'success');
+                    if (this.opsConsole) {
+                        this.opsConsole.showToast('SERIAL LINK', 'Reconnected to authorized ESP32 hardware node at 115200 baud.', 'success');
                     }
                 }
             });
@@ -724,15 +818,15 @@ class NexusApp {
                             this.incidentManager.setMitreFilter(tech);
                         }
                         // Display toast
-                        if (this.wazuhConsole) {
-                            this.wazuhConsole.showToast('FILTER APPLIED', `Showing incidents mapped to ${tech}.`, 'info');
+                        if (this.opsConsole) {
+                            this.opsConsole.showToast('FILTER APPLIED', `Showing incidents mapped to ${tech}.`, 'info');
                         }
                     } else {
                         if (this.incidentManager) {
                             this.incidentManager.setMitreFilter(null);
                         }
-                        if (this.wazuhConsole) {
-                            this.wazuhConsole.showToast('FILTER CLEARED', 'Showing all incidents.', 'info');
+                        if (this.opsConsole) {
+                            this.opsConsole.showToast('FILTER CLEARED', 'Showing all incidents.', 'info');
                         }
                     }
                 };
@@ -793,17 +887,17 @@ class NexusApp {
         let startEpoch = null;
         let endEpoch = null;
 
-        if (this.wazuhConsole && this.wazuhConsole.activeTimeRange === 'custom') {
-            const startWinId = this.wazuhConsole.customRangeStart;
-            const endWinId = this.wazuhConsole.customRangeEnd;
+        if (this.opsConsole && this.opsConsole.activeTimeRange === 'custom') {
+            const startWinId = this.opsConsole.customRangeStart;
+            const endWinId = this.opsConsole.customRangeEnd;
             if (startWinId !== null && endWinId !== null && this.allWindows.length > 0) {
                 const wStart = this.allWindows.find(w => w.window_id === startWinId);
                 const wEnd = this.allWindows.find(w => w.window_id === endWinId);
                 if (wStart && wStart.epoch_ms) startEpoch = wStart.epoch_ms;
                 if (wEnd && wEnd.epoch_ms) endEpoch = wEnd.epoch_ms;
             }
-        } else if (this.wazuhConsole && this.wazuhConsole.activeTimeRange) {
-            const range = this.wazuhConsole.activeTimeRange;
+        } else if (this.opsConsole && this.opsConsole.activeTimeRange) {
+            const range = this.opsConsole.activeTimeRange;
             const now = Date.now();
             if (range === '15m') startEpoch = now - 15 * 60 * 1000;
             else if (range === '1h') startEpoch = now - 60 * 60 * 1000;
@@ -834,8 +928,8 @@ class NexusApp {
         const current = window.audioRadar ? window.audioRadar.enabled : false;
         const newState = !current;
         setGlobalAudioState(newState);
-        if (this.wazuhConsole) {
-            this.wazuhConsole.showToast('AUDIO RADAR', `Threat Chirp Synthesizer: ${newState ? 'ACTIVE' : 'MUTED'}`, 'info');
+        if (this.opsConsole) {
+            this.opsConsole.showToast('AUDIO RADAR', `Threat Chirp Synthesizer: ${newState ? 'ACTIVE' : 'MUTED'}`, 'info');
         }
         return newState;
     }
@@ -916,8 +1010,8 @@ class NexusApp {
             }).catch(() => {});
         }
 
-        if (this.wazuhConsole) {
-            this.wazuhConsole.showToast('SETTINGS SAVED', 'Local Ollama endpoint, model parameters, and retention policies updated.', 'success', 4000);
+        if (this.opsConsole) {
+            this.opsConsole.showToast('SETTINGS SAVED', 'Local Ollama endpoint, model parameters, and retention policies updated.', 'success', 4000);
         }
     }
 
@@ -1021,8 +1115,8 @@ class NexusApp {
             const data = await resp.json();
             if (data.status === 'online') {
                 const toastMsg = `Ollama Online (${data.latency_ms}ms) | Model '${model}' ${data.model_found ? 'Ready' : 'Not Loaded'}`;
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('ENDPOINT ONLINE', toastMsg, 'success');
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('ENDPOINT ONLINE', toastMsg, 'success');
                 }
                 if (btn) {
                     btn.textContent = `ONLINE (${data.latency_ms}ms)`;
@@ -1031,8 +1125,8 @@ class NexusApp {
                 }
             } else {
                 const errorMsg = `AI Offline (Rule-Based Fallback Active): ${data.error || 'Connection refused'}`;
-                if (this.wazuhConsole) {
-                    this.wazuhConsole.showToast('AI OFFLINE', errorMsg, 'error');
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('AI OFFLINE', errorMsg, 'error');
                 }
                 if (btn) {
                     btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
@@ -1042,8 +1136,8 @@ class NexusApp {
             }
         } catch (err) {
             const errorMsg = `AI Offline (Rule-Based Fallback Active): ${err.message || 'Connection refused'}`;
-            if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('AI OFFLINE', errorMsg, 'error');
+            if (this.opsConsole) {
+                this.opsConsole.showToast('AI OFFLINE', errorMsg, 'error');
             }
             if (btn) {
                 btn.textContent = 'AI Offline (Rule-Based Fallback Active)';
@@ -1162,15 +1256,18 @@ class NexusApp {
         }
     }
 
-    async hydrateFromBackend() {
-        const mode = localStorage.getItem('nexus_active_mode') || 'SIMULATION';
+    async hydrateFromBackend(explicitMode = null) {
+        const mode = (explicitMode || localStorage.getItem('nexus_active_mode') || 'SIMULATION').toUpperCase();
         const depth = parseInt(localStorage.getItem('nexus_reload_depth') || '100', 10);
         const apiBase = window.location.port === '8000' ? '' : 'http://127.0.0.1:8000';
         this.ledgerOffset = 0;
         const pageInfo = document.getElementById('ledgerPageInfo');
         if (pageInfo) pageInfo.textContent = 'Showing latest windows in memory';
 
-        // Clear stale state before hydrating (prevents duplicate rows on manual reload)
+        // Clear stale state before hydrating (prevents duplicate rows and stale attack overlays on reload)
+        this.syntheticBurstRemaining = 0;
+        this.syntheticBurstType = null;
+        this.activeAttackLabelling = false;
         this.allWindows = [];
         if (this.chart) this.chart.clear();
         if (this.tableManager && typeof this.tableManager.clear === 'function') this.tableManager.clear();
@@ -1187,11 +1284,11 @@ class NexusApp {
                     }
                     windows.sort((a, b) => (a.window_id ?? a.id ?? 0) - (b.window_id ?? b.id ?? 0));
                     for (const w of windows) {
-                        const deauth = w.deauth_count ?? w.deauth ?? 0;
-                        const mgmt   = w.mgmt_count   ?? w.mgmt   ?? 0;
-                        const ble    = w.ble_count     ?? w.ble    ?? 0;
-                        const rogue  = w.rogue_count   ?? w.rogue  ?? 0;
-                        const nfc    = w.nfc_count     ?? w.nfc    ?? 0;
+                        const deauth = Number(w.deauth_count ?? w.deauth ?? 0);
+                        const mgmt   = Number(w.mgmt_count   ?? w.mgmt   ?? 0);
+                        const ble    = Number(w.ble_count    ?? w.ble    ?? 0);
+                        const rogue  = Number(w.rogue_count  ?? w.rogue  ?? 0);
+                        const nfc    = Number(w.nfc_count    ?? w.nfc    ?? 0);
                         const rssi   = w.rssi_avg      ?? w.rssi   ?? -68;
                         const winId  = w.window_id     ?? w.id     ?? 0;
 
@@ -1221,7 +1318,7 @@ class NexusApp {
                         if (this.chart && typeof this.chart.addMultiPoint === 'function') {
                             this.chart.addMultiPoint({
                                 window_id: winId,
-                                is_attack_labelled: windowRecord.is_attack_labelled,
+                                is_attack_labelled: 0,
                                 signals: {
                                     deauth: { observed: deauth, mean: meanDeauth, sd: 1.0, flagged: Math.abs(zDeauth) > this.zThreshold, z: zDeauth },
                                     mgmt:   { observed: mgmt,   mean: mgmt,       sd: 4.0, flagged: Math.abs(zMgmt) > this.zThreshold,   z: zMgmt },
@@ -1250,8 +1347,8 @@ class NexusApp {
                     }
                     this.updateOperationalKpis();
                     this.updateNodeHealthCard();
-                    if (this.wazuhConsole && typeof this.wazuhConsole.refreshViews === 'function') {
-                        this.wazuhConsole.refreshViews();
+                    if (this.opsConsole && typeof this.opsConsole.refreshViews === 'function') {
+                        this.opsConsole.refreshViews();
                     }
                 }
             }
@@ -1280,17 +1377,21 @@ class NexusApp {
                                 remSteps = [0];
                             }
                         }
+                        const sevUpper = String(inc.severity || 'HIGH').toUpperCase();
+                        const fallbackConf = sevUpper === 'HIGH' ? 0.90 : (sevUpper === 'MEDIUM' ? 0.78 : (sevUpper === 'LOW' ? 0.65 : null));
+                        const resolvedWin = inc.start_window ?? inc.window_id ?? '--';
                         return {
                             ...inc,
                             id: inc.incident_id || inc.id,
                             db_id: inc.id,
                             type: inc.type || inc.title || inc.event_type || inc.primary_type || 'Wireless Anomaly',
                             type_key: inc.type_key || inc.primary_type || 'deauth',
-                            window_id: inc.window_id ?? inc.start_window ?? 0,
+                            start_window: resolvedWin,
+                            window_id: inc.window_id ?? inc.start_window ?? '--',
                             time: inc.time || (inc.start_epoch_ms ? new Date(inc.start_epoch_ms).toLocaleTimeString() : 'Recorded'),
-                            severity: String(inc.severity || 'HIGH').toUpperCase(),
+                            severity: sevUpper,
                             status: String(inc.status || 'OPEN').toUpperCase(),
-                            confidence: typeof inc.confidence === 'number' ? inc.confidence : 0.90,
+                            confidence: typeof inc.confidence === 'number' ? inc.confidence : fallbackConf,
                             mitre: inc.mitre || (inc.mitre_technique_id ? {
                                 id: inc.mitre_technique_id,
                                 name: inc.mitre_technique_name || 'Wireless Attack',
@@ -1300,6 +1401,9 @@ class NexusApp {
                         };
                     });
                     this.incidentManager.incidents = normalizedIncidents;
+                    if (typeof this.incidentManager.syncCounterFromIncidents === 'function') {
+                        this.incidentManager.syncCounterFromIncidents();
+                    }
                     this.incidentManager.renderIncidentsTable();
                     this.incidentManager.updateKpiCard();
                 }
@@ -1323,19 +1427,60 @@ class NexusApp {
                 // Backend offline; keep default whitelist
             }
         }
+
+        requestAnimationFrame(() => {
+            if (this.chart) {
+                this.chart.resize();
+                this.chart.render();
+            }
+            const benchPanel = document.getElementById('panel-benchmark');
+            if (benchPanel && (benchPanel.classList.contains('active') || benchPanel.style.display === 'flex')) {
+                this.computeAndRenderDetectorMetrics();
+                this.renderThresholdSweepChart();
+                if (this.evaluationManager) this.evaluationManager.loadAblationTable();
+            }
+        });
     }
 
-    setMode(newMode) {
-        if (this.mode && newMode !== this.mode) {
+    setMode(newMode, skipHydrate = false) {
+        const modeChanged = Boolean(this.mode && newMode !== this.mode);
+        if (modeChanged) {
             this.allWindows = [];
+            this.windowCount = 0;
+            this.isWarmup = true;
             if (this.chart) this.chart.clear();
+            if (this.tableManager && typeof this.tableManager.clear === 'function') {
+                this.tableManager.clear();
+            }
+            if (this.incidentManager) {
+                this.incidentManager.incidents = [];
+                this.incidentManager.selectedIncident = null;
+                this.incidentManager.unacknowledgedCount = 0;
+                this.incidentManager.trustedAps = (newMode === 'SIMULATION' && typeof this.incidentManager.getDefaultSimulationTrustedAps === 'function')
+                    ? this.incidentManager.getDefaultSimulationTrustedAps()
+                    : [];
+                this.incidentManager.renderTrustedApsTable();
+                this.incidentManager.renderIncidentsTable();
+                this.incidentManager.renderDefensivePlaybook(null);
+                this.incidentManager.updateKpiCard();
+            }
+            this.nvsWhitelist = newMode === 'SIMULATION'
+                ? [{ ssid: 'Campus-Corp-Secure', bssid: '00:14:2D:E1:92:40' }]
+                : [];
+            this.renderNvsWhitelistTable();
+            this.updateNvsWhitelistStatus();
         }
         this.mode = newMode;
         localStorage.setItem('nexus_active_mode', newMode);
 
+        if (modeChanged && !skipHydrate && (newMode === 'SIMULATION' || newMode === 'LIVE')) {
+            this.hydrateFromBackend();
+        }
+
         // Mode-aware hardware groupbox visibility (hide hardware-only panels in Simulation/Replay)
         const scanBox = document.getElementById('groupboxScanStrategy');
         const nvsBox = document.getElementById('groupboxNvsWhitelist');
+        const sdBox = document.getElementById('groupboxSdLogs');
         const isLive = newMode === 'LIVE';
         if (scanBox) {
             scanBox.style.display = isLive ? 'flex' : 'none';
@@ -1344,6 +1489,10 @@ class NexusApp {
         if (nvsBox) {
             nvsBox.style.display = isLive ? 'flex' : 'none';
             nvsBox.style.opacity = '1.0';
+        }
+        if (sdBox) {
+            sdBox.style.display = isLive ? 'flex' : 'none';
+            sdBox.style.opacity = '1.0';
         }
 
         // Load mode-specific settings profile
@@ -1359,17 +1508,22 @@ class NexusApp {
         const btnSim = document.getElementById('btnModeSim');
         const btnLive = document.getElementById('btnModeLive');
         const btnReplay = document.getElementById('btnModeReplay');
+        const btnRunDemo = document.getElementById('btnRunDemo');
+        const btnStartPause = document.getElementById('btnStartPause');
+        const btnResetLab = document.getElementById('btnResetLab');
+        const menuRunDemo = document.getElementById('menuRunDemoScenario');
 
         if (btnSim) btnSim.classList.toggle('active', newMode === 'SIMULATION');
         if (btnLive) btnLive.classList.toggle('active', newMode === 'LIVE');
         if (btnReplay) btnReplay.classList.toggle('active', newMode === 'REPLAY');
+        if (btnRunDemo) btnRunDemo.style.display = (newMode === 'SIMULATION') ? 'inline-flex' : 'none';
+        if (btnStartPause) btnStartPause.style.display = (newMode === 'SIMULATION') ? 'inline-flex' : 'none';
+        if (btnResetLab) btnResetLab.style.display = (newMode === 'SIMULATION') ? 'inline-flex' : 'none';
+        if (menuRunDemo) menuRunDemo.disabled = (newMode !== 'SIMULATION');
 
         if (replayToolbar) {
             replayToolbar.style.display = newMode === 'REPLAY' ? 'flex' : 'none';
         }
-
-        const badge = document.getElementById('titlebarModeBadge');
-        if (badge) badge.textContent = `${newMode} ACTIVE`;
 
         if (newMode === 'SIMULATION') {
             if (this.serialReceiver && this.serialReceiver.port) {
@@ -1517,8 +1671,8 @@ class NexusApp {
         const kpiBase = document.getElementById('kpiBaselineState');
         const kpiBaseSub = document.getElementById('kpiBaselineSubtext');
         if (kpiBase && kpiBaseSub) {
-            if (this.isWarmup && this.windowCount < this.warmupWindows) {
-                kpiBase.textContent = `WARMUP [${this.windowCount}/${this.warmupWindows}]`;
+            if (this.isWarmup && this.sessionWindowCount < this.warmupWindows) {
+                kpiBase.textContent = `WARMUP [${this.sessionWindowCount}/${this.warmupWindows}]`;
                 kpiBase.className = 'status-panel-val text-amber';
                 kpiBaseSub.textContent = 'CONVERGING DISTRIBUTIONS';
             } else {
@@ -1545,8 +1699,8 @@ class NexusApp {
         const warmupText = document.getElementById('nodeWarmupText');
         const warmupBar = document.getElementById('nodeWarmupBar');
 
-        const isWarmedUp = this.windowCount >= this.warmupWindows;
-        const progressWin = Math.min(this.windowCount, this.warmupWindows);
+        const isWarmedUp = (!this.isWarmup) || (this.sessionWindowCount >= this.warmupWindows);
+        const progressWin = isWarmedUp ? this.warmupWindows : Math.min(this.sessionWindowCount, this.warmupWindows);
         const percent = Math.round((progressWin / this.warmupWindows) * 100);
 
         if (stateEl) {
@@ -1557,7 +1711,7 @@ class NexusApp {
                 stateEl.textContent = 'REPLAY 115200';
                 stateEl.className = 'node-state-pill pill-active';
             } else {
-                stateEl.textContent = isWarmedUp ? 'SIMULATION ACTIVE' : `WARMUP [${this.windowCount}/${this.warmupWindows}]`;
+                stateEl.textContent = isWarmedUp ? 'SIMULATION ACTIVE' : `WARMUP [${this.sessionWindowCount}/${this.warmupWindows}]`;
                 stateEl.className = `node-state-pill ${isWarmedUp ? 'pill-active' : 'pill-warmup'}`;
             }
         }
@@ -1584,12 +1738,61 @@ class NexusApp {
         }
     }
 
+    rearmLiveWarmup() {
+        this.windowCount = 0;
+        this.sessionWindowCount = 0;
+        this.isWarmup = true;
+        this.scanPlanDeployed = false;
+        for (const feat of this.features) {
+            this.baselines[feat] = { mean: 0.0, variance: 1.0, initialized: false };
+        }
+        this.updateOperationalKpis();
+        this.updateNodeStatusDisplay();
+        this.updateNodeHealthCard();
+    }
+
+    getLastContiguousLiveWin() {
+        if (!Array.isArray(this.allWindows) || this.allWindows.length === 0) {
+            return 0;
+        }
+        const ids = this.allWindows
+            .map(w => Number(w.window_id ?? 0))
+            .filter(id => Number.isFinite(id) && id > 0)
+            .sort((a, b) => a - b);
+        if (ids.length === 0) return 0;
+
+        let lastContiguous = ids[0];
+        for (let i = 1; i < ids.length; i++) {
+            if (ids[i] === lastContiguous) continue;
+            if (ids[i] === lastContiguous + 1) {
+                lastContiguous = ids[i];
+            } else {
+                return lastContiguous;
+            }
+        }
+        return lastContiguous;
+    }
+
     async connectSerial() {
         if (this.serialReceiver && this.serialReceiver.port) {
             await this.serialReceiver.disconnect();
         } else {
-            this.setMode('LIVE');
-            await this.serialReceiver.connect(115200);
+            const needsHydrate = this.mode !== 'LIVE' || this.allWindows.length === 0;
+            this.setMode('LIVE', needsHydrate);
+            if (needsHydrate) {
+                await this.hydrateFromBackend('live');
+            }
+            const lastKnownLiveWin = this.getLastContiguousLiveWin();
+            this.rearmLiveWarmup();
+            const connected = await this.serialReceiver.connect(115200);
+            if (connected && this.serialReceiver.sendSerialCommand) {
+                await new Promise(resolve => setTimeout(resolve, 150));
+                if (lastKnownLiveWin === 0) {
+                    await this.serialReceiver.sendSerialCommand({ cmd: 'win_reset' });
+                } else {
+                    await this.serialReceiver.sendSerialCommand({ cmd: 'sd_sync', since_win: lastKnownLiveWin });
+                }
+            }
         }
     }
 
@@ -1620,6 +1823,9 @@ class NexusApp {
             clearInterval(this.timer);
             this.timer = null;
         }
+        this.running = false;
+        const btn = document.getElementById('btnStartPause');
+        if (btn) btn.textContent = 'Resume';
     }
 
     toggleAttackLabelling() {
@@ -1724,12 +1930,25 @@ class NexusApp {
     }
 
     handleTelemetryWindow(payload, source) {
+        if (source === 'sd_sync') {
+            const syncWinId = parseInt(payload.win ?? payload.window_id, 10);
+            if (Number.isFinite(syncWinId) && this.allWindows.some(w => Number(w.window_id) === syncWinId)) {
+                return;
+            }
+        }
         if (typeof payload.win !== 'undefined' && payload.win !== null) {
-            this.windowCount = parseInt(payload.win, 10);
+            const incomingWin = parseInt(payload.win, 10);
+            if (source === 'live (serial)' && Number.isFinite(incomingWin) && incomingWin <= 1 && this.windowCount > 1) {
+                this.rearmLiveWarmup();
+            }
+            this.windowCount = source === 'sd_sync' ? Math.max(this.windowCount, incomingWin) : incomingWin;
         } else if (typeof payload.window_id !== 'undefined' && payload.window_id !== null) {
             this.windowCount = parseInt(payload.window_id, 10);
         } else {
             this.windowCount++;
+        }
+        if (source !== 'sd_sync') {
+            this.sessionWindowCount++;
         }
         const nfcCount = parseInt(payload.nfc, 10) || 0;
         if (nfcCount > 0) {
@@ -1757,7 +1976,7 @@ class NexusApp {
         }
 
         const wasWarmup = this.isWarmup;
-        const isWarmedUp = (!this.isWarmup) || (this.windowCount >= this.warmupWindows);
+        const isWarmedUp = (!this.isWarmup) || (this.sessionWindowCount >= this.warmupWindows);
         if (isWarmedUp) {
             this.isWarmup = false;
         }
@@ -1935,7 +2154,7 @@ class NexusApp {
         });
 
         // 4. Update Tables & Status
-        let windowState = isWarmedUp ? 'ACTIVE' : `WARMUP [${this.windowCount}/${this.warmupWindows}]`;
+        let windowState = isWarmedUp ? 'ACTIVE' : `WARMUP [${this.sessionWindowCount}/${this.warmupWindows}]`;
         if (isWarmedUp) {
             if (currentFlags.deauth) windowState = 'ANOMALY_DEAUTH';
             else if (currentFlags.rogue) windowState = 'ANOMALY_ROGUE';
@@ -1984,21 +2203,36 @@ class NexusApp {
         this.updateOperationalKpis(currentThreat);
         this.updateNodeHealthCard();
 
-        // Synchronize Wazuh-Style Operations Console
-        if (this.wazuhConsole) {
-            this.wazuhConsole.refreshViews();
+        // Synchronize Operations Console
+        if (this.opsConsole) {
+            this.opsConsole.refreshViews();
         }
     }
 
     async syncWindowToBackend(windowRecord) {
+        const p = windowRecord.payload || windowRecord;
+        const flatPayload = {
+            window_id: windowRecord.window_id,
+            deauth: p.deauth ?? 0,
+            mgmt: p.mgmt ?? 0,
+            ble: p.ble ?? 0,
+            rogue: p.rogue ?? 0,
+            nfc: p.nfc ?? 0,
+            ch: p.ch ?? 1,
+            bssid_cnt: p.bssid_cnt ?? 0,
+            rssi: p.rssi ?? -70,
+            rssi_avg: p.rssi ?? -70,
+            data_source: windowRecord.data_source || (this.mode === 'SIMULATION' ? 'simulation' : 'live'),
+            is_attack_labelled: windowRecord.is_attack_labelled ?? 0
+        };
         try {
-            await fetch('http://127.0.0.1:8000/api/telemetry/ingest', {
+            await fetch(`${this.getApiBase()}/api/telemetry/ingest`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Nexus-Key': 'nexus-local-dev-token'
                 },
-                body: JSON.stringify(windowRecord)
+                body: JSON.stringify(flatPayload)
             });
         } catch (err) {
             // Non-blocking: fail quietly if backend offline
@@ -2006,8 +2240,11 @@ class NexusApp {
     }
 
     async syncIncidentToBackend(alertRecord, incident) {
+        const dbMode = this.mode === 'SIMULATION' ? 'simulation' : 'live';
+        if (alertRecord) alertRecord.data_source = dbMode;
+        if (incident) incident.data_source = dbMode;
         try {
-            await fetch('http://127.0.0.1:8000/api/incidents/sync', {
+            await fetch(`${this.getApiBase()}/api/incidents/sync?mode=${dbMode}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -2085,8 +2322,8 @@ class NexusApp {
                         await this.serialReceiver.sendSerialCommand(serialCmd);
                     }
 
-                    if (this.wazuhConsole) {
-                        this.wazuhConsole.showToast('SCAN PLAN ADAPTED', `Baseline active. Deployed tiered plan: CH ${primaryCh} (85%), Patrol (15%).`, 'success');
+                    if (this.opsConsole) {
+                        this.opsConsole.showToast('SCAN PLAN ADAPTED', `Baseline active. Deployed tiered plan: CH ${primaryCh} (85%), Patrol (15%).`, 'success');
                     }
                 }
             }
@@ -2155,11 +2392,11 @@ class NexusApp {
             // Non-blocking
         }
 
-        if (this.wazuhConsole) {
+        if (this.opsConsole) {
             const desc = mode === 'round_robin'
                 ? 'Deployed Uniform Round-Robin (1–13).'
                 : `Deployed Tiered Plan: Primary CH ${targetCh} (85%), Patrol (15%).`;
-            this.wazuhConsole.showToast('SCAN STRATEGY DEPLOYED', desc + (serialOk ? ' [Sent via Serial]' : ''), 'info');
+            this.opsConsole.showToast('SCAN STRATEGY DEPLOYED', desc + (serialOk ? ' [Sent via Serial]' : ''), 'info');
         }
     }
 
@@ -2213,8 +2450,8 @@ class NexusApp {
         const bssid = inputBssid ? inputBssid.value.trim().toUpperCase() : '';
 
         if (!ssid || !bssid) {
-            if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('NVS WHITELIST', 'Both SSID and BSSID (MAC) are required.', 'error');
+            if (this.opsConsole) {
+                this.opsConsole.showToast('NVS WHITELIST', 'Both SSID and BSSID (MAC) are required.', 'error');
             }
             return;
         }
@@ -2222,8 +2459,8 @@ class NexusApp {
         // Validate MAC address format AA:BB:CC:DD:EE:FF
         const macRegex = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/;
         if (!macRegex.test(bssid)) {
-            if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('NVS WHITELIST', 'Invalid BSSID format. Use AA:BB:CC:DD:EE:FF.', 'error');
+            if (this.opsConsole) {
+                this.opsConsole.showToast('NVS WHITELIST', 'Invalid BSSID format. Use AA:BB:CC:DD:EE:FF.', 'error');
             }
             return;
         }
@@ -2261,8 +2498,8 @@ class NexusApp {
             // Non-blocking fail quietly if backend offline
         }
 
-        if (this.wazuhConsole) {
-            this.wazuhConsole.showToast('NVS FLASH', `Committed ${ssid} [${bssid}] to ESP32 NVS.`, 'info');
+        if (this.opsConsole) {
+            this.opsConsole.showToast('NVS FLASH', `Committed ${ssid} [${bssid}] to ESP32 NVS.`, 'info');
         }
     }
 
@@ -2288,8 +2525,191 @@ class NexusApp {
             // Non-blocking fail quietly if backend offline
         }
 
-        if (this.wazuhConsole) {
-            this.wazuhConsole.showToast('NVS FLASH', 'Purged all whitelisted AP entries from ESP32 NVS.', 'warning');
+        if (this.opsConsole) {
+            this.opsConsole.showToast('NVS FLASH', 'Purged all whitelisted AP entries from ESP32 NVS.', 'warning');
+        }
+    }
+
+    requireSerialConnected() {
+        if (this.serialReceiver && this.serialReceiver.port && this.serialReceiver.sendSerialCommand) {
+            return true;
+        }
+        if (this.opsConsole) {
+            this.opsConsole.showToast('SERIAL DISCONNECTED', 'Connect ESP32-S3 over Web Serial (115200 baud) first.', 'warning');
+        }
+        this.showWin32Dialog('Web Serial Not Connected', `
+            <div style="font-size: 11px; line-height: 1.5;">
+                Connect the ESP32-S3 hardware node over USB Serial (115200 baud) in <strong>Live Serial</strong> mode before accessing MicroSD logs.
+            </div>
+        `);
+        return false;
+    }
+
+    async checkSdStatus() {
+        if (!this.requireSerialConnected()) return;
+        const statusEl = document.getElementById('sdLogStatus');
+        if (statusEl) statusEl.textContent = 'SD: QUERYING...';
+        await this.serialReceiver.sendSerialCommand({ cmd: 'sd_info' });
+    }
+
+    async startSdDownload(fileType) {
+        if (!this.requireSerialConnected()) return;
+        if (this.sdTransfer.active) {
+            if (this.opsConsole) {
+                this.opsConsole.showToast('SD TRANSFER', 'A MicroSD log transfer is already in progress.', 'warning');
+            }
+            return;
+        }
+        const targetFile = fileType === 'csv' ? 'csv' : 'jsonl';
+        this.sdTransfer = { active: true, file: targetFile, buffer: '' };
+        const progEl = document.getElementById('sdTransferProgress');
+        if (progEl) progEl.textContent = `Starting /nexus_logs.${targetFile} (0 bytes)...`;
+        await this.serialReceiver.sendSerialCommand({ cmd: 'sd_read', file: targetFile, offset: 0, limit: 256 });
+    }
+
+    confirmDeleteSdLogs() {
+        if (!this.requireSerialConnected()) return;
+        this.showWin32Dialog('Confirm MicroSD Log Deletion', `
+            <div style="font-size: 11px; line-height: 1.5; margin-bottom: 10px;">
+                Delete <code>/nexus_logs.jsonl</code> and <code>/nexus_logs.csv</code> from the ESP32 MicroSD card? This cannot be undone.
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 6px;">
+                <button id="btnConfirmSdDeleteAction" class="tool-btn tool-btn-danger">Delete SD Logs</button>
+            </div>
+        `);
+        const btnConfirm = document.getElementById('btnConfirmSdDeleteAction');
+        if (btnConfirm) {
+            btnConfirm.onclick = async () => {
+                const modal = document.getElementById('win32Modal');
+                if (modal) modal.style.display = 'none';
+                await this.serialReceiver.sendSerialCommand({ cmd: 'sd_del' });
+            };
+        }
+    }
+
+    async scanDiscoveredAps() {
+        if (!this.serialReceiver || !this.serialReceiver.port || !this.serialReceiver.sendSerialCommand) {
+            if (this.opsConsole) {
+                this.opsConsole.showToast('NVS WHITELIST', 'Connect ESP32-S3 over Live Serial first.', 'warning');
+            }
+            return;
+        }
+        await this.serialReceiver.sendSerialCommand({ cmd: 'get_aps' });
+    }
+
+    populateDiscoveredAps(aps) {
+        const list = Array.isArray(aps) ? aps : [];
+        const selects = [
+            document.getElementById('selectDiscoveredAp'),
+            document.getElementById('selectTrustedDiscoveredAp')
+        ].filter(Boolean);
+
+        selects.forEach(select => {
+            select.innerHTML = '';
+            const defaultOpt = document.createElement('option');
+            defaultOpt.value = '';
+            defaultOpt.textContent = list.length > 0
+                ? `-- Select Discovered AP (${list.length}) --`
+                : '-- No APs Discovered --';
+            select.appendChild(defaultOpt);
+
+            list.forEach(ap => {
+                if (!ap || !ap.bssid) return;
+                const ssid = typeof ap.ssid === 'string' ? ap.ssid : '';
+                const bssid = String(ap.bssid).toUpperCase();
+                const ch = ap.ch !== undefined ? ap.ch : '?';
+                const opt = document.createElement('option');
+                opt.value = bssid;
+                opt.dataset.ssid = ssid;
+                opt.dataset.ch = ap.ch !== undefined ? String(ap.ch) : '';
+                opt.textContent = `${ssid || '<Hidden SSID>'} (${bssid} | CH ${ch})`;
+                select.appendChild(opt);
+            });
+        });
+    }
+
+    handleSerialControl(payload) {
+        if (payload.type === 'ap_list' && Array.isArray(payload.aps)) {
+            this.populateDiscoveredAps(payload.aps);
+            return;
+        }
+        if (payload.type === 'sd_sync_line' && payload.data) {
+            this.handleTelemetryWindow(payload.data, 'sd_sync');
+            return;
+        }
+        if (payload.type === 'sd_sync_done') {
+            const syncedCount = Number(payload.count ?? 0);
+            if (this.opsConsole) {
+                this.opsConsole.showToast('SD SYNC', `Synced ${syncedCount} missed window(s) from ESP32 MicroSD.`, 'info');
+            }
+            return;
+        }
+
+        const statusEl = document.getElementById('sdLogStatus');
+        const progEl = document.getElementById('sdTransferProgress');
+
+        if (payload.sd_info !== undefined) {
+            const info = (typeof payload.sd_info === 'object' && payload.sd_info !== null) ? payload.sd_info : payload;
+            const ready = Boolean(info.ready ?? info.ok ?? payload.sd_info === true);
+            const jsonlBytes = Number(info.jsonl_bytes ?? payload.jsonl_bytes ?? 0);
+            const csvBytes = Number(info.csv_bytes ?? payload.csv_bytes ?? 0);
+            if (statusEl) {
+                statusEl.textContent = ready
+                    ? `SD: READY | JSONL: ${jsonlBytes.toLocaleString()} B | CSV: ${csvBytes.toLocaleString()} B`
+                    : 'SD: MISSING';
+            }
+            return;
+        }
+
+        if (payload.sd_chunk !== undefined) {
+            if (!this.sdTransfer.active) return;
+            const chunkData = typeof payload.data === 'string' ? payload.data : '';
+            const offset = Number(payload.offset ?? 0);
+            const len = Number(payload.len ?? chunkData.length);
+            const transferred = offset + len;
+
+            this.sdTransfer.buffer += chunkData;
+            if (progEl) {
+                progEl.textContent = `Downloading /nexus_logs.${this.sdTransfer.file}: ${transferred.toLocaleString()} bytes`;
+            }
+
+            if (!payload.eof) {
+                this.serialReceiver.sendSerialCommand({
+                    cmd: 'sd_read',
+                    file: this.sdTransfer.file,
+                    offset: transferred,
+                    limit: 256
+                });
+            } else {
+                const fileName = this.sdTransfer.file === 'csv' ? 'nexus_logs.csv' : 'nexus_logs.jsonl';
+                const mimeType = this.sdTransfer.file === 'csv' ? 'text/csv;charset=utf-8' : 'application/x-ndjson;charset=utf-8';
+                const blob = new Blob([this.sdTransfer.buffer], { type: mimeType });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+
+                const finalBytes = this.sdTransfer.buffer.length;
+                this.sdTransfer = { active: false, file: null, buffer: '' };
+                if (progEl) progEl.textContent = `Completed ${fileName} (${finalBytes.toLocaleString()} bytes)`;
+                if (this.opsConsole) {
+                    this.opsConsole.showToast('SD DOWNLOAD', `Downloaded ${fileName} (${finalBytes.toLocaleString()} bytes).`, 'success');
+                }
+            }
+            return;
+        }
+
+        if (payload.sd_del !== undefined) {
+            if (statusEl) statusEl.textContent = 'SD: LOGS DELETED';
+            if (progEl) progEl.textContent = 'Idle';
+            if (this.opsConsole) {
+                this.opsConsole.showToast('SD LOGS', 'ESP32 MicroSD black-box logs deleted.', 'warning');
+            }
+            this.checkSdStatus();
         }
     }
 
@@ -2298,8 +2718,8 @@ class NexusApp {
             const removed = this.nvsWhitelist.splice(index, 1)[0];
             this.renderNvsWhitelistTable();
             this.updateNvsWhitelistStatus();
-            if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('NVS FLASH', `Removed ${removed.ssid} from whitelist.`, 'info');
+            if (this.opsConsole) {
+                this.opsConsole.showToast('NVS FLASH', `Removed ${removed.ssid} from whitelist.`, 'info');
             }
         }
     }
@@ -2415,10 +2835,10 @@ class NexusApp {
             const m = det.m || {};
             rowsHtml += `
                 <tr>
-                    <td style="font-weight: 600; color: #f4f4f5;">${det.name}</td>
+                    <td style="font-weight: 600; color: var(--text-primary);">${det.name}</td>
                     <td class="font-mono">${formatMetric(m.precision)}</td>
                     <td class="font-mono">${formatMetric(m.recall)}</td>
-                    <td class="font-mono" style="color: ${det.name.includes('NEXUS') ? '#22c55e' : '#cbd5e1'}; font-weight: 600;">${formatMetric(m.f1)}</td>
+                    <td class="font-mono" style="color: ${det.name.includes('NEXUS') ? 'var(--status-emerald)' : 'var(--text-secondary)'}; font-weight: 600;">${formatMetric(m.f1)}</td>
                     <td class="font-mono">${formatMetric(m.fpr)}</td>
                     <td class="font-mono">${m.attacks_caught || 0}/${m.total_attacks || 0}</td>
                     <td class="font-mono">${formatLatency(m.latency)}</td>
@@ -2435,7 +2855,8 @@ class NexusApp {
         }
 
         // Dynamic Ablation Analysis Study update
-        fetch('/api/evaluation/ablation')
+        const dbMode = this.mode === 'SIMULATION' ? 'simulation' : 'live';
+        fetch(`${this.getApiBase()}/api/evaluation/ablation?mode=${dbMode}`)
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data && data.configurations) {
@@ -2445,17 +2866,34 @@ class NexusApp {
                     const c3 = c.config_3_adaptive_with_freeze || {};
                     const c4 = c.config_4_nexus_complete || {};
 
-                    const elFixed = document.getElementById('ablFixedF1');
-                    if (elFixed && c1.f1 !== undefined) elFixed.textContent = Number(c1.f1).toFixed(2);
+                    const setNum = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el && val !== undefined && val !== null && !isNaN(Number(val))) {
+                            el.textContent = Number(val).toFixed(2);
+                        }
+                    };
 
-                    const elNoFreeze = document.getElementById('ablNoFreezeF1');
-                    if (elNoFreeze && c2.f1 !== undefined) elNoFreeze.textContent = Number(c2.f1).toFixed(2);
+                    setNum('ablFixedF1', c1.f1);
+                    setNum('ablFixedFpr', c1.fpr);
+                    setNum('ablNoFreezeF1', c2.f1);
+                    setNum('ablNoFreezeFpr', c2.fpr);
+                    setNum('ablFreezeF1', c3.f1);
+                    setNum('ablFreezeFpr', c3.fpr);
+                    setNum('ablFullF1', c4.f1);
+                    setNum('ablNexusF1', c4.f1);
+                    setNum('ablNexusFpr', c4.fpr);
 
-                    const elFreeze = document.getElementById('ablFreezeF1');
-                    if (elFreeze && c3.f1 !== undefined) elFreeze.textContent = Number(c3.f1).toFixed(2);
-
-                    const elFull = document.getElementById('ablFullF1') || document.getElementById('ablNexusF1');
-                    if (elFull && c4.f1 !== undefined) elFull.textContent = Number(c4.f1).toFixed(2);
+                    const setGain = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el && val !== undefined && val !== null) {
+                            el.textContent = typeof val === 'number' ? `${val >= 0 ? '+' : ''}${val.toFixed(1)}%` : String(val);
+                        }
+                    };
+                    setGain('ablFixedGain', c1.relative_gain);
+                    setGain('ablNoFreezeGain', c2.relative_gain);
+                    setGain('ablFreezeGain', c3.relative_gain);
+                    setGain('ablFullGain', c4.relative_gain);
+                    setGain('ablNexusGain', c4.relative_gain);
                 }
             })
             .catch(() => {});
@@ -2470,7 +2908,8 @@ class NexusApp {
         let optF1 = 0.96;
 
         try {
-            const resp = await fetch('/api/evaluation/threshold-sweep');
+            const dbMode = this.mode === 'SIMULATION' ? 'simulation' : 'live';
+            const resp = await fetch(`${this.getApiBase()}/api/evaluation/threshold-sweep?mode=${dbMode}`);
             if (resp.ok) {
                 const data = await resp.json();
                 if (data && Array.isArray(data.sweep_results) && data.sweep_results.length > 0) {
@@ -2512,13 +2951,25 @@ class NexusApp {
         const plotW = w - padLeft - padRight;
         const plotH = h - padTop - padBottom;
 
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        const gridColor = isLight ? '#e2e8f0' : 'rgba(255, 255, 255, 0.06)';
+        const axisTextColor = isLight ? '#334155' : '#71717a';
+        const precColor = isLight ? '#0284c7' : '#38bdf8';
+        const recColor = isLight ? '#b45309' : '#f59e0b';
+        const f1Color = isLight ? '#15803d' : '#22c55e';
+        const legendTextColor = isLight ? '#334155' : '#cbd5e1';
+
         ctx.clearRect(0, 0, w, h);
+        if (isLight) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+        }
 
         // Horizontal grid lines
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.strokeStyle = gridColor;
         ctx.lineWidth = 1;
         ctx.font = '10px Consolas, monospace';
-        ctx.fillStyle = '#71717a';
+        ctx.fillStyle = axisTextColor;
         ctx.textAlign = 'right';
 
         for (let yVal = 0; yVal <= 1.0; yVal += 0.25) {
@@ -2565,7 +3016,7 @@ class NexusApp {
         const optX = padLeft + ((optZ - zMin) / (zMax - zMin)) * plotW;
         ctx.save();
         ctx.setLineDash([4, 4]);
-        ctx.strokeStyle = '#22c55e';
+        ctx.strokeStyle = f1Color;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(optX, padTop);
@@ -2573,7 +3024,7 @@ class NexusApp {
         ctx.stroke();
         ctx.restore();
 
-        ctx.fillStyle = '#22c55e';
+        ctx.fillStyle = f1Color;
         ctx.font = '600 10px Consolas, monospace';
         ctx.textAlign = 'left';
         ctx.fillText(`Optimal Z = ${optZ}\u03C3 (F1 = ${optF1.toFixed(2)})`, padLeft + 10, padTop - 12);
@@ -2602,18 +3053,18 @@ class NexusApp {
             });
         };
 
-        drawSeries('prec', '#38bdf8', 2);
-        drawSeries('rec', '#f59e0b', 2);
-        drawSeries('f1', '#22c55e', 2.5);
+        drawSeries('prec', precColor, 2);
+        drawSeries('rec', recColor, 2);
+        drawSeries('f1', f1Color, 2.5);
 
         // Legend at top-right
         ctx.font = '10px Consolas, monospace';
         ctx.textAlign = 'left';
 
         const legendItems = [
-            { label: 'Precision', color: '#38bdf8' },
-            { label: 'Recall', color: '#f59e0b' },
-            { label: 'F1-Score', color: '#22c55e' }
+            { label: 'Precision', color: precColor },
+            { label: 'Recall', color: recColor },
+            { label: 'F1-Score', color: f1Color }
         ];
 
         let legX = padLeft + plotW - 180;
@@ -2623,7 +3074,7 @@ class NexusApp {
             ctx.arc(legX, padTop - 15, 3.5, 0, Math.PI * 2);
             ctx.fill();
 
-            ctx.fillStyle = '#cbd5e1';
+            ctx.fillStyle = legendTextColor;
             ctx.fillText(item.label, legX + 7, padTop - 12);
             legX += 58;
         });
@@ -2662,8 +3113,8 @@ class NexusApp {
     parseReplayCsv(csvText) {
         const lines = csvText.trim().split(/\r?\n/);
         if (lines.length < 2) {
-            if (this.wazuhConsole) {
-                this.wazuhConsole.showToast('REPLAY ERROR', 'CSV file contains no telemetry data rows.', 'danger');
+            if (this.opsConsole) {
+                this.opsConsole.showToast('REPLAY ERROR', 'CSV file contains no telemetry data rows.', 'danger');
             } else {
                 this.showWin32Dialog('CSV Import Error', '<div style="font-size: 11px;">CSV file contains no telemetry data rows.</div>');
             }
@@ -2764,6 +3215,7 @@ class NexusApp {
 
     resetTelemetryState() {
         this.windowCount = 0;
+        this.sessionWindowCount = 0;
         this.nfcCount = 0;
         this.lastEventWindow = -999;
         this.eventCounter = 0;
@@ -2785,8 +3237,8 @@ class NexusApp {
         this.updateOperationalKpis();
         this.updateNodeStatusDisplay();
         this.updateNodeHealthCard();
-        if (this.wazuhConsole) {
-            this.wazuhConsole.refreshViews();
+        if (this.opsConsole) {
+            this.opsConsole.refreshViews();
         }
     }
 
@@ -2794,6 +3246,7 @@ class NexusApp {
         this.stopSimulation();
         this.stopReplay();
         this.resetTelemetryState();
+        this.windowCount = 0;
 
         this.serialErrorCount = 0;
         this.droppedFramesCount = 0;
@@ -2805,10 +3258,14 @@ class NexusApp {
         this.primaryChannel = 6;
         this.scanPlanDeployed = false;
 
-        // Onboard NVS Flash AP Whitelist
-        this.nvsWhitelist = [
-            { ssid: 'Campus-Corp-Secure', bssid: '00:14:2D:E1:92:40' }
-        ];
+        // Onboard NVS Flash AP Whitelist (seed demo entry strictly in Simulation mode)
+        const initMode = localStorage.getItem('nexus_active_mode') || 'SIMULATION';
+        this.nvsWhitelist = initMode === 'SIMULATION'
+            ? [{ ssid: 'Campus-Corp-Secure', bssid: '00:14:2D:E1:92:40' }]
+            : [];
+
+        // Web Serial MicroSD download transfer state
+        this.sdTransfer = { active: false, file: null, buffer: '' };
 
         this.running = false;
         const btn = document.getElementById('btnStartPause');
